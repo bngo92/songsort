@@ -1,0 +1,38 @@
+[package]
+name = "songsort-wasm"
+version = "0.1.0"
+authors = ["Bryan Ngo <bngo@linkedin.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+base64 = "0.13.0"
+getrandom = { version = "0.2.2", features = [ "js" ] }
+rand = "0.8.3"
+serde = { version = "1.0.80", features = ["derive"] }
+wasm-bindgen = { version = "0.2.78", features = ["serde-serialize"]  }
+wasm-bindgen-futures = "0.4.28"
+
+[dependencies.web-sys]
+version = "0.3.4"
+features = [
+  'Document',
+  'Element',
+  'HtmlElement',
+  'HtmlIFrameElement',
+  'HtmlInputElement',
+  'Node',
+  'Window',
+  'CssStyleDeclaration',
+  'HtmlButtonElement',
+  'Headers',
+  'Request',
+  'RequestInit',
+  'RequestMode',
+  'Response',
+  'Window',
+]
