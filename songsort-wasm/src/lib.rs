@@ -18,9 +18,13 @@ struct Scores {
 
 #[derive(Deserialize)]
 struct Score {
+    id: String,
     track_id: String,
     track: String,
+    user_id: String,
     score: i32,
+    wins: i32,
+    losses: i32,
 }
 
 struct State {
@@ -117,7 +121,21 @@ pub async fn run() -> Result<(), JsValue> {
     let a = Closure::wrap(Box::new(move || {
         let state = Rc::clone(&state_ref);
         state.borrow_mut().playlist = input.value();
-        wasm_bindgen_futures::spawn_local((async || refresh(state).await.unwrap())())
+        wasm_bindgen_futures::spawn_local((async move || {
+            let window = web_sys::window().expect("no global `window` exists");
+            let url = format!("https://branlandapp.com/api/{}", state.borrow().playlist);
+            let mut opts = RequestInit::new();
+            opts.method("POST");
+            opts.mode(RequestMode::Cors);
+            let request = Request::new_with_str_and_init(&url, &opts).unwrap();
+            request
+                .headers()
+                .set("Authorization", &format!("Basic {}", state.borrow().auth))
+                .unwrap();
+            JsFuture::from(window.fetch_with_request(&request))
+                .await
+                .unwrap();
+        })())
     }) as Box<dyn FnMut()>);
     document
         .get_element_by_id("import")
@@ -167,7 +185,7 @@ fn refresh_state(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), Js
     }
     for score in &scores.scores {
         let val = document.create_element("li")?;
-        val.set_text_content(Some(&format!("{} {}", score.track, score.score)));
+        val.set_text_content(Some(&format!("{} {}-{} {}", score.track, score.wins, score.losses, score.score)));
         element.append_child(&val)?;
     }
     let scores: Vec<_> = scores
