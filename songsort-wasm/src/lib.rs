@@ -177,16 +177,58 @@ fn refresh_state(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), Js
     let window = web_sys::window().expect("no global `window` exists");
     let document = window.document().expect("should have a document on window");
     scores.scores.sort_by_key(|s| -s.score);
-    let element = document
-        .get_element_by_id("scores")
+    let scores1 = document
+        .get_element_by_id("scores1")
         .ok_or(JsValue::from("scores element missing"))?;
-    while let Some(child) = element.first_element_child() {
+    while let Some(child) = scores1.first_element_child() {
         child.remove();
     }
-    for score in &scores.scores {
-        let val = document.create_element("li")?;
-        val.set_text_content(Some(&format!("{} {}-{} {}", score.track, score.wins, score.losses, score.score)));
-        element.append_child(&val)?;
+    let scores2 = document
+        .get_element_by_id("scores2")
+        .ok_or(JsValue::from("scores element missing"))?;
+    while let Some(child) = scores2.first_element_child() {
+        child.remove();
+    }
+    for (i, scores) in scores.scores.chunks_mut(2).enumerate() {
+        let row = document.create_element("tr")?;
+        let num = document.create_element("th")?;
+        num.set_text_content(Some(&(2 * i + 1).to_string()));
+        row.append_child(&num)?;
+        let track = document.create_element("td")?;
+        track.set_text_content(Some(&scores[0].track));
+        row.append_child(&track)?;
+        let record = document.create_element("td")?;
+        record.set_text_content(Some(&format!("{}-{}", scores[0].wins, scores[0].losses)));
+        row.append_child(&record)?;
+        let score_element = document.create_element("td")?;
+        score_element.set_text_content(Some(&scores[0].score.to_string()));
+        row.append_child(&score_element)?;
+        scores1.append_child(&row)?;
+
+        let second_score = scores.get(1);
+        let row = document.create_element("tr")?;
+        let num = document.create_element("th")?;
+        if second_score.is_some() {
+            num.set_text_content(Some(&(2 * i + 2).to_string()));
+        }
+        row.append_child(&num)?;
+        let track = document.create_element("td")?;
+        track.set_text_content(second_score.map(|s| {
+            s.track.as_ref()
+        }));
+        row.append_child(&track)?;
+        let record = document.create_element("td")?;
+        if second_score.is_some() {
+            record.set_text_content(Some(&format!("{}-{}", scores[0].wins, scores[0].losses)));
+        }
+        row.append_child(&record)?;
+        let score_element = document.create_element("td")?;
+        if let Some(score) = second_score {
+            score_element.set_text_content(Some(&score.score.to_string()));
+        }
+        row.append_child(&record)?;
+        row.append_child(&score_element)?;
+        scores2.append_child(&row)?;
     }
     let scores: Vec<_> = scores
         .scores
