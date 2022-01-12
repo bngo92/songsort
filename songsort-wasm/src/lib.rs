@@ -153,6 +153,9 @@ async fn refresh(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
 }
 
 fn refresh_state(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), JsValue> {
+    if scores.scores.is_empty() {
+        return Ok(());
+    }
     let window = web_sys::window().expect("no global `window` exists");
     let document = window.document().expect("should have a document on window");
     scores.scores.sort_by_key(|s| -s.score);
