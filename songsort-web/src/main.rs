@@ -1,20 +1,20 @@
+use azure_core::Context;
+use azure_cosmos::prelude::{
+    AuthorizationToken, CollectionClient, CosmosClient, CosmosEntity, CosmosOptions,
+    CreateDocumentOptions, DatabaseClient, Query, ReplaceDocumentOptions,
+};
+use azure_cosmos::responses::{
+    QueryDocumentsResponse, QueryDocumentsResponseDocuments, QueryResult,
+};
 use hyper::header::HeaderValue;
 use hyper::http::response::Builder;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Client, Method, Request, Response, Server, StatusCode, Uri};
 use hyper_tls::HttpsConnector;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
-
-type Db = Arc<
-    Mutex<(
-        HashMap<String, Playlist>,
-        HashMap<String, HashMap<String, Score>>,
-    )>,
->;
+use uuid::Uuid;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct Token {
@@ -26,13 +26,23 @@ struct Scores {
     scores: Vec<Score>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct Score {
-    playlist: String,
+    id: String,
     track_id: String,
     track: String,
+    user_id: String,
     score: i32,
-    preview_url: Option<String>,
+    wins: i32,
+    losses: i32,
+}
+
+impl<'a> CosmosEntity<'a> for Score {
+    type Entity = &'a str;
+
+    fn partition_key(&'a self) -> Self::Entity {
+        self.user_id.as_ref()
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -42,40 +52,23 @@ struct Playlists {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct Playlist {
-    name: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct PlaylistItems {
-    items: Vec<Item>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct Item {
-    track: Track,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct Track {
     id: String,
+    playlist_id: String,
     name: String,
-    album: Album,
-    artists: Vec<Artist>,
-    preview_url: Option<String>,
+    user_id: String,
+    tracks: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-struct Album {
-    name: String,
+impl<'a> CosmosEntity<'a> for Playlist {
+    type Entity = &'a str;
+
+    fn partition_key(&'a self) -> Self::Entity {
+        self.user_id.as_ref()
+    }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-struct Artist {
-    name: String,
-}
-
-async fn handle(req: Request<Body>, db: Db) -> Result<Response<Body>, Infallible> {
-    Ok(match route(req, db).await {
+async fn handle(db: CosmosClient, req: Request<Body>) -> Result<Response<Body>, Infallible> {
+    Ok(match route(db, req).await {
         Err(e) => {
             eprintln!("server error: {:?}", e);
             Response::builder()
@@ -87,82 +80,250 @@ async fn handle(req: Request<Body>, db: Db) -> Result<Response<Body>, Infallible
     })
 }
 
-async fn route(req: Request<Body>, db: Db) -> Result<Response<Body>, Error> {
-    if req.uri().path() == "/login" {
-        if req.method() == Method::OPTIONS
-            || req.headers().get("Authorization")
-                == HeaderValue::from_str(&format!(
-                    "Basic {}",
-                    std::env::var("AUTH").expect("AUTH is missing")
-                ))
-                .ok()
-                .as_ref()
-        {
-            get_response_builder()
+async fn route(db: CosmosClient, req: Request<Body>) -> Result<Response<Body>, Error> {
+    let db = db.into_database_client("songsort");
+    let user_id = req.headers()["x-real-ip"]
+        .to_str()
+        .expect("x-real-ip to be ASCII")
+        .to_owned();
+    eprintln!("{}", req.uri().path());
+    if let Some(path) = req.uri().path().strip_prefix("/api/") {
+        let path: Vec<_> = path.split('/').collect();
+        if req.method() == Method::OPTIONS {
+            return get_response_builder()
                 .header(
                     "Access-Control-Allow-Headers",
                     HeaderValue::from_static("Authorization"),
                 )
                 .status(StatusCode::OK)
                 .body(Body::empty())
-                .map_err(Error::from)
-        } else {
-            get_response_builder()
+                .map_err(Error::from);
+        }
+        if req.headers().get("Authorization")
+            != HeaderValue::from_str(&format!(
+                "Basic {}",
+                std::env::var("AUTH").expect("AUTH is missing")
+            ))
+            .ok()
+            .as_ref()
+        {
+            return get_response_builder()
                 .status(StatusCode::UNAUTHORIZED)
                 .body(Body::empty())
-                .map_err(Error::from)
+                .map_err(Error::from);
         }
-    } else if req.uri().path() == "/playlists" {
-        get_playlists(db).await
+        match (&path[..], req.method()) {
+            (["login"], _) => get_response_builder()
+                .header(
+                    "Access-Control-Allow-Headers",
+                    HeaderValue::from_static("Authorization"),
+                )
+                .status(StatusCode::OK)
+                .body(Body::empty())
+                .map_err(Error::from),
+            (["playlists"], &Method::GET) => get_playlists(db, user_id).await,
+            ([playlist_id], &Method::POST) => import_playlist(db, user_id, playlist_id).await,
+            ([path], &Method::GET) => {
+                if let Some(query) = req.uri().query() {
+                    elo(db, user_id, path, query).await
+                } else {
+                    get_scores(db, user_id, path).await
+                }
+            }
+            (_, _) => get_response_builder()
+                .status(StatusCode::METHOD_NOT_ALLOWED)
+                .body(Body::empty())
+                .map_err(Error::from),
+        }
     } else {
-        get_playlist(&req, db, &req.uri().path()[1..]).await
+        get_response_builder()
+            .header(
+                "Access-Control-Allow-Headers",
+                HeaderValue::from_static("Authorization"),
+            )
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::empty())
+            .map_err(Error::from)
     }
 }
 
-async fn get_playlists(db: Db) -> Result<Response<Body>, Error> {
-    let db = db.lock().unwrap();
+async fn get_playlists(db: DatabaseClient, user_id: String) -> Result<Response<Body>, Error> {
+    let db = db.into_collection_client("playlists");
+    let query = format!("SELECT * FROM c WHERE c.user_id = {}", user_id);
+    let query = Query::new(&query);
+    let resp: QueryDocumentsResponse<Playlist> = db.query_documents().execute(&query).await?;
     let playlist = Playlists {
-        items: db.0.values().cloned().collect(),
+        items: resp
+            .results
+            .into_iter()
+            .map(|r| {
+                if let QueryResult::Document(d) = r {
+                    d.result
+                } else {
+                    todo!()
+                }
+            })
+            .collect(),
     };
     get_response_builder()
         .body(Body::from(serde_json::to_string(&playlist)?))
         .map_err(Error::from)
 }
 
-async fn get_playlist(
-    req: &Request<Body>,
-    db: Db,
+/*async fn get_playlist(db: DatabaseClient, playlist_id: String) -> Result<Response<Body>, Error> {
+    let db = db
+        .into_collection_client("playlists")
+        .into_document_client(playlist_id, &playlist_id)?;
+    if let GetDocumentResponse::Found(playlist) = db
+        .get_document::<Score>(Context::new(), GetDocumentOptions::new())
+        .await?
+    {
+        let playlist = playlist.document;
+        get_response_builder()
+            .body(Body::from(serde_json::to_string(&playlist)?))
+            .map_err(Error::from)
+    } else {
+        todo!()
+    }
+}*/
+
+async fn elo(
+    db: DatabaseClient,
+    user_id: String,
     playlist_id: &str,
+    query: &str,
 ) -> Result<Response<Body>, Error> {
-    let playlist_id = playlist_id.to_owned();
-    if let Some(query) = req.uri().query() {
-        if let Some((win, lose)) = query.split_once('&') {
-            let win = win.to_owned();
-            let lose = lose.to_owned();
-            let db = &mut db.lock().unwrap().1;
-            let win_score = db[&playlist_id][&win].score;
-            let lose_score = db[&playlist_id][&lose].score;
-            let expected_win = 1. / (1. + 10f64.powf((lose_score - win_score) as f64 / 400.));
-            let expected_lose = 1. / (1. + 10f64.powf((win_score - lose_score) as f64 / 400.));
+    let client = db.clone().into_collection_client("scores");
+    if let Some((win, lose)) = query.split_once('&') {
+        let scores = get_score_docs(client.clone(), user_id.clone(), &[win, lose]).await?;
+        let mut iter = scores.into_iter();
+        if let (Some(win_score), Some(lose_score)) = (iter.next(), iter.next()) {
+            let (mut win_score, mut lose_score) = if win_score.track_id == win {
+                (win_score, lose_score)
+            } else {
+                (lose_score, win_score)
+            };
+            let expected_win =
+                1. / (1. + 10f64.powf((lose_score.score - win_score.score) as f64 / 400.));
+            let expected_lose =
+                1. / (1. + 10f64.powf((win_score.score - lose_score.score) as f64 / 400.));
             let win_diff = (32. * (1. - expected_win)) as i32;
             let lose_diff = (32. * expected_lose) as i32;
-            db.get_mut(&playlist_id)
-                .unwrap()
-                .get_mut(&win)
-                .unwrap()
-                .score += win_diff;
-            db.get_mut(&playlist_id)
-                .unwrap()
-                .get_mut(&lose)
-                .unwrap()
-                .score -= lose_diff;
+            win_score.score += win_diff;
+            lose_score.score -= lose_diff;
+            win_score.wins += 1;
+            lose_score.losses += 1;
+            let client1 = client
+                .clone()
+                .into_document_client(win_score.id.clone(), &win_score.user_id)?;
+            let client2 =
+                client.into_document_client(lose_score.id.clone(), &lose_score.user_id)?;
+            futures::future::try_join(
+                client1.replace_document(Context::new(), &win_score, ReplaceDocumentOptions::new()),
+                client2.replace_document(
+                    Context::new(),
+                    &lose_score,
+                    ReplaceDocumentOptions::new(),
+                ),
+            )
+            .await?;
         } else {
             return get_response_builder()
                 .status(StatusCode::BAD_REQUEST)
                 .body(Body::empty())
                 .map_err(Error::from);
         }
+    } else {
+        return get_response_builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::empty())
+            .map_err(Error::from);
     }
+    get_scores(db, user_id, playlist_id).await
+}
+
+async fn get_score_docs(
+    db: CollectionClient,
+    user_id: String,
+    track_ids: &[&str],
+) -> Result<Vec<Score>, Error> {
+    let query = format!(
+        "SELECT * FROM c WHERE c.user_id = \"{}\" AND c.track_id IN ({})",
+        user_id,
+        track_ids
+            .iter()
+            .map(|t| format!("\"{}\"", t))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let query = Query::new(&query);
+    let resp: QueryDocumentsResponse<Score> = db.query_documents().execute(&query).await?;
+    Ok(resp
+        .results
+        .into_iter()
+        .map(|r| {
+            if let QueryResult::Document(d) = r {
+                d.result
+            } else {
+                todo!()
+            }
+        })
+        .collect())
+}
+
+async fn get_scores(
+    db: DatabaseClient,
+    user_id: String,
+    playlist_id: &str,
+) -> Result<Response<Body>, Error> {
+    let playlists = db.clone().into_collection_client("playlists");
+    let query = format!(
+        "SELECT * FROM c WHERE c.user_id = \"{}\" AND c.playlist_id = \"{}\"",
+        user_id, playlist_id
+    );
+    let resp: QueryDocumentsResponse<Playlist> =
+        playlists.query_documents().execute(&query).await?;
+    let playlist = Playlists {
+        items: resp
+            .results
+            .into_iter()
+            .map(|r| {
+                if let QueryResult::Document(d) = r {
+                    d.result
+                } else {
+                    todo!()
+                }
+            })
+            .collect(),
+    };
+
+    let db = db.into_collection_client("scores");
+    let query = format!(
+        "SELECT * FROM c WHERE c.user_id = \"{}\" AND c.track_id IN ({})",
+        user_id,
+        playlist.items[0]
+            .tracks
+            .iter()
+            .map(|t| format!("\"{}\"", t))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let query = Query::new(&query);
+    let resp =
+        QueryDocumentsResponseDocuments::try_from(db.query_documents().execute(&query).await?)?;
+    let scores = Scores {
+        scores: resp.results.into_iter().map(|r| r.result).collect(),
+    };
+    get_response_builder()
+        .body(Body::from(serde_json::to_string(&scores)?))
+        .map_err(Error::from)
+}
+
+async fn import_playlist(
+    db: DatabaseClient,
+    user_id: String,
+    playlist_id: &str,
+) -> Result<Response<Body>, Error> {
     let https = HttpsConnector::new();
     let client = Client::builder().build::<_, hyper::Body>(https);
     let uri: Uri = "https://accounts.spotify.com/api/token".parse().unwrap();
@@ -184,6 +345,23 @@ async fn get_playlist(
         .await?;
     let got = hyper::body::to_bytes(resp.into_body()).await?;
     let token: Token = serde_json::from_slice(&got)?;
+
+    let https = HttpsConnector::new();
+    let client = Client::builder().build::<_, hyper::Body>(https);
+    let uri: Uri = format!("https://api.spotify.com/v1/playlists/{}", playlist_id)
+        .parse()
+        .unwrap();
+    let resp = client
+        .request(
+            Request::builder()
+                .uri(uri)
+                .header("Authorization", format!("Bearer {}", token.access_token))
+                .body(Body::empty())?,
+        )
+        .await?;
+    let got = hyper::body::to_bytes(resp.into_body()).await?;
+    let playlist: songsort_web::Playlist = serde_json::from_slice(&got)?;
+
     let https = HttpsConnector::new();
     let client = Client::builder().build::<_, hyper::Body>(https);
     let uri: Uri = format!(
@@ -201,23 +379,41 @@ async fn get_playlist(
         )
         .await?;
     let got = hyper::body::to_bytes(resp.into_body()).await?;
-    let playlist: PlaylistItems = serde_json::from_slice(&got)?;
-    let db = &mut db.lock().unwrap().1;
-    let playlist_db = db.entry(playlist_id.clone()).or_insert_with(HashMap::new);
-    for i in &playlist.items {
-        playlist_db.entry(i.track.id.clone()).or_insert(Score {
-            playlist: playlist_id.to_owned(),
+    let playlist_items: songsort_web::PlaylistItems = serde_json::from_slice(&got)?;
+    let playlist = Playlist {
+        id: Uuid::new_v4().to_hyphenated().to_string(),
+        user_id: user_id.clone(),
+        playlist_id: playlist_id.to_owned(),
+        name: playlist.name,
+        tracks: playlist_items
+            .items
+            .iter()
+            .map(|i| i.track.id.clone())
+            .collect(),
+    };
+
+    let playlist_client = db.clone().into_collection_client("playlists");
+    playlist_client
+        .create_document(Context::new(), &playlist, CreateDocumentOptions::new())
+        .await?;
+    let score_client = db.into_collection_client("scores");
+    for i in &playlist_items.items {
+        let score = Score {
+            id: Uuid::new_v4().to_hyphenated().to_string(),
             track_id: i.track.id.clone(),
             track: i.track.name.clone(),
+            user_id: user_id.clone(),
             score: 1500,
-            preview_url: i.track.preview_url.clone(),
-        });
+            wins: 0,
+            losses: 0,
+        };
+        score_client
+            .create_document(Context::new(), &score, CreateDocumentOptions::new())
+            .await?;
     }
-    let scores = Scores {
-        scores: playlist_db.values().cloned().collect(),
-    };
     get_response_builder()
-        .body(Body::from(serde_json::to_string(&scores)?))
+        .status(StatusCode::CREATED)
+        .body(Body::empty())
         .map_err(Error::from)
 }
 
@@ -228,12 +424,21 @@ async fn main() {
 
     // A `Service` is needed for every connection, so this
     // creates one from our `hello_world` function.
-    let db = Arc::new(Mutex::new((HashMap::new(), HashMap::new())));
+    let master_key =
+        std::env::var("COSMOS_MASTER_KEY").expect("Set env variable COSMOS_MASTER_KEY first!");
+    let account = std::env::var("COSMOS_ACCOUNT").expect("Set env variable COSMOS_ACCOUNT first!");
+    let authorization_token =
+        AuthorizationToken::primary_from_base64(&master_key).expect("cosmos config");
+    let client = CosmosClient::new(
+        account.clone(),
+        authorization_token,
+        CosmosOptions::default(),
+    );
     let make_svc = make_service_fn(move |_conn| {
-        let db = Arc::clone(&db);
+        let client_ref = client.clone();
         async {
             // service_fn converts our function into a `Service`
-            Ok::<_, Infallible>(service_fn(move |r| handle(r, Arc::clone(&db))))
+            Ok::<_, Infallible>(service_fn(move |r| handle(client_ref.clone(), r)))
         }
     });
 
@@ -255,6 +460,7 @@ enum Error {
     HyperError(hyper::Error),
     RequestError(hyper::http::Error),
     JSONError(serde_json::Error),
+    CosmosError(azure_cosmos::Error),
 }
 
 impl From<hyper::Error> for Error {
@@ -272,5 +478,11 @@ impl From<hyper::http::Error> for Error {
 impl From<serde_json::Error> for Error {
     fn from(e: serde_json::Error) -> Error {
         Error::JSONError(e)
+    }
+}
+
+impl From<azure_cosmos::Error> for Error {
+    fn from(e: azure_cosmos::Error) -> Error {
+        Error::CosmosError(e)
     }
 }
