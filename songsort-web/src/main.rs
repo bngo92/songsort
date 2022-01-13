@@ -149,7 +149,7 @@ async fn route(db: CosmosClient, req: Request<Body>) -> Result<Response<Body>, E
 
 async fn get_playlists(db: DatabaseClient, user_id: String) -> Result<Response<Body>, Error> {
     let db = db.into_collection_client("playlists");
-    let query = format!("SELECT * FROM c WHERE c.user_id = {}", user_id);
+    let query = format!("SELECT * FROM c WHERE c.user_id = \"{}\"", user_id);
     let query = Query::new(&query);
     let resp: QueryDocumentsResponse<Playlist> = db.query_documents().execute(&query).await?;
     let playlist = Playlists {
