@@ -7,31 +7,45 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    HtmlButtonElement, HtmlIFrameElement, HtmlInputElement, Request, RequestInit, RequestMode,
-    Response,
+    Element, HtmlAnchorElement, HtmlButtonElement, HtmlIFrameElement, HtmlInputElement, Request,
+    RequestInit, RequestMode, Response,
 };
 
 #[derive(Deserialize)]
-struct Scores {
-    scores: Vec<Score>,
+pub struct Scores {
+    pub scores: Vec<Score>,
 }
 
 #[derive(Deserialize)]
-struct Score {
-    id: String,
-    track_id: String,
-    track: String,
-    user_id: String,
-    score: i32,
-    wins: i32,
-    losses: i32,
+pub struct Score {
+    pub id: String,
+    pub track_id: String,
+    pub track: String,
+    pub user_id: String,
+    pub score: i32,
+    pub wins: i32,
+    pub losses: i32,
 }
 
-struct State {
-    playlist: String,
-    score1: String,
-    score2: String,
-    auth: String,
+#[derive(Deserialize)]
+struct Playlists {
+    items: Vec<Playlist>,
+}
+
+#[derive(Deserialize)]
+pub struct Playlist {
+    pub id: String,
+    pub playlist_id: String,
+    pub name: String,
+    pub user_id: String,
+    pub tracks: Vec<String>,
+}
+
+pub struct State {
+    pub playlist: String,
+    pub score1: String,
+    pub score2: String,
+    pub auth: String,
 }
 
 // Called by our JS entry point to run the example
@@ -48,38 +62,48 @@ pub async fn run() -> Result<(), JsValue> {
     let state_ref = Rc::clone(&state);
     let username = document
         .get_element_by_id("username")
-        .ok_or(JsValue::from("username element missing"))?
+        .ok_or_else(|| JsValue::from("username element missing"))?
         .dyn_into::<HtmlInputElement>()?;
     let password = document
         .get_element_by_id("password")
-        .ok_or(JsValue::from("password element missing"))?
+        .ok_or_else(|| JsValue::from("password element missing"))?
         .dyn_into::<HtmlInputElement>()?;
     let a = Closure::wrap(Box::new(move || {
         let state = Rc::clone(&state_ref);
-        let auth = base64::encode(format!("{}:{}", username.value(), password.value()));
-        state.borrow_mut().auth = auth.clone();
-        wasm_bindgen_futures::spawn_local((async || {
+        state.borrow_mut().auth =
+            base64::encode(format!("{}:{}", username.value(), password.value()));
+        wasm_bindgen_futures::spawn_local(async {
             let window = web_sys::window().expect("no global `window` exists");
-            let url = format!("https://branlandapp.com/api/login");
-            let request = query(&url, &state.borrow().auth).unwrap();
+            let document = window.document().expect("should have a document on window");
+            let request = query("https://branlandapp.com/api/login", &state.borrow().auth).unwrap();
             let resp_value = JsFuture::from(window.fetch_with_request(&request))
                 .await
                 .unwrap();
             let resp: Response = resp_value.dyn_into().unwrap();
             if resp.status() == 401 {
-                window.alert_with_message("Invalid username or password");
+                window
+                    .alert_with_message("Invalid username or password")
+                    .expect("alert");
             } else {
-                refresh(state).await;
+                // TODO: clean up login elements
+                document
+                    .get_element_by_id("login")
+                    .ok_or_else(|| JsValue::from("login element missing"))
+                    .unwrap()
+                    .dyn_into::<HtmlButtonElement>()
+                    .unwrap()
+                    .set_onclick(None);
+                generate_playlists_page(state).await;
             }
-        })())
+        })
     }) as Box<dyn FnMut()>);
     document
         .get_element_by_id("login")
-        .ok_or(JsValue::from("login element missing"))?
+        .ok_or_else(|| JsValue::from("login element missing"))?
         .dyn_into::<HtmlButtonElement>()?
         .set_onclick(Some(a.as_ref().unchecked_ref()));
     a.forget();
-    let state_ref = Rc::clone(&state);
+    /*let state_ref = Rc::clone(&state);
     let a = Closure::wrap(Box::new(move || {
         let state = Rc::clone(&state_ref);
         let url = format!(
@@ -92,7 +116,7 @@ pub async fn run() -> Result<(), JsValue> {
     }) as Box<dyn FnMut()>);
     document
         .get_element_by_id("score1")
-        .ok_or(JsValue::from("score1 element missing"))?
+        .ok_or_else(||JsValue::from("score1 element missing"))?
         .dyn_into::<HtmlButtonElement>()?
         .set_onclick(Some(a.as_ref().unchecked_ref()));
     a.forget();
@@ -109,21 +133,57 @@ pub async fn run() -> Result<(), JsValue> {
     }) as Box<dyn FnMut()>);
     document
         .get_element_by_id("score2")
-        .ok_or(JsValue::from("score2 element missing"))?
+        .ok_or_else(||JsValue::from("score2 element missing"))?
         .dyn_into::<HtmlButtonElement>()?
         .set_onclick(Some(a.as_ref().unchecked_ref()));
-    a.forget();
-    let state_ref = Rc::clone(&state);
+    a.forget();*/
+
+    Ok(())
+}
+
+async fn generate_playlists_page(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
+    let window = web_sys::window().expect("no global `window` exists");
+    let document = window.document().expect("should have a document on window");
+    let main = document
+        .get_element_by_id("main")
+        .ok_or_else(|| JsValue::from("main element missing"))?;
+    let header = document.create_element("h1")?;
+    header.set_text_content(Some("Playlists"));
+    main.append_child(&header)?;
+    let form = document.create_element("form")?;
+    let playlists = document.create_element("div")?;
+    load_playlists(Rc::clone(&state), &playlists).await?;
+    form.append_child(&playlists)?;
+    let row = document.create_element("div")?;
+    row.set_class_name("row");
     let input = document
-        .get_element_by_id("input")
-        .ok_or(JsValue::from("input element missing"))?
+        .create_element("input")?
         .dyn_into::<HtmlInputElement>()?;
+    input.set_type("text");
+    input.set_id("input");
+    input.set_value("https://open.spotify.com/playlist/5jPjYAdQO0MgzHdwSmYPNZ?si=05d659645f2d4781");
+    input.set_class_name("col-7");
+    row.append_child(&input)?;
+    let import = document
+        .create_element("button")?
+        .dyn_into::<HtmlButtonElement>()?;
+    import.set_type("button");
+    import.set_class_name("col-1 offset-2 btn btn-success");
+    import.set_text_content(Some("Import"));
+    row.append_child(&import)?;
+    form.append_child(&row)?;
+    main.append_child(&form)?;
     let a = Closure::wrap(Box::new(move || {
-        let state = Rc::clone(&state_ref);
-        state.borrow_mut().playlist = input.value();
-        wasm_bindgen_futures::spawn_local((async move || {
+        let state = Rc::clone(&state);
+        wasm_bindgen_futures::spawn_local(async move {
             let window = web_sys::window().expect("no global `window` exists");
-            let url = format!("https://branlandapp.com/api/{}", state.borrow().playlist);
+            let document = window.document().expect("should have a document on window");
+            let input = document
+                .get_element_by_id("input")
+                .unwrap()
+                .dyn_into::<HtmlInputElement>()
+                .unwrap();
+            let url = format!("https://branlandapp.com/api/{}", input.value());
             let mut opts = RequestInit::new();
             opts.method("POST");
             opts.mode(RequestMode::Cors);
@@ -132,18 +192,15 @@ pub async fn run() -> Result<(), JsValue> {
                 .headers()
                 .set("Authorization", &format!("Basic {}", state.borrow().auth))
                 .unwrap();
-            JsFuture::from(window.fetch_with_request(&request))
+            let resp_value = JsFuture::from(window.fetch_with_request(&request))
                 .await
                 .unwrap();
-        })())
+            let resp: Response = resp_value.dyn_into().unwrap();
+            if resp.status() == 200 {}
+        })
     }) as Box<dyn FnMut()>);
-    document
-        .get_element_by_id("import")
-        .ok_or(JsValue::from("import element missing"))?
-        .dyn_into::<HtmlButtonElement>()?
-        .set_onclick(Some(a.as_ref().unchecked_ref()));
+    import.set_onclick(Some(a.as_ref().unchecked_ref()));
     a.forget();
-
     Ok(())
 }
 
@@ -158,15 +215,63 @@ async fn play(state: Rc<RefCell<State>>, url: String) -> Result<(), JsValue> {
     Ok(())
 }
 
-async fn refresh(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
+async fn load_playlists(
+    state: Rc<RefCell<State>>,
+    playlists_element: &Element,
+) -> Result<(), JsValue> {
     let window = web_sys::window().expect("no global `window` exists");
-    let url = format!("https://branlandapp.com/api/{}", state.borrow().playlist);
-    let request = query(&url, &state.borrow().auth)?;
+    let document = window.document().expect("should have a document on window");
+    let request = query(
+        "https://branlandapp.com/api/playlists",
+        &state.borrow().auth,
+    )?;
     let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
     let resp: Response = resp_value.dyn_into()?;
     let json = JsFuture::from(resp.json()?).await?;
-    let scores: Scores = json.into_serde().unwrap();
-    refresh_state(state, scores)?;
+    let playlists: Playlists = json.into_serde().unwrap();
+    while let Some(child) = playlists_element.first_element_child() {
+        child.remove();
+    }
+    for p in playlists.items {
+        let row = document.create_element("div")?;
+        row.set_class_name("row");
+        let label = document.create_element("label")?;
+        label.set_class_name("col-7 col-form-label");
+        let link = document
+            .create_element("a")?
+            .dyn_into::<HtmlAnchorElement>()?;
+        link.set_text_content(Some(&p.name));
+        link.set_href(&format!(
+            "https://open.spotify.com/playlist/{}",
+            p.playlist_id
+        ));
+        label.append_child(&link)?;
+        row.append_child(&label)?;
+        let div = document.create_element("div")?;
+        div.set_class_name("col-2");
+        let select = document.create_element("select")?;
+        select.set_class_name("form-select");
+        let option = document.create_element("option")?;
+        option.set_text_content(Some("Random match"));
+        select.append_child(&option)?;
+        div.append_child(&select)?;
+        row.append_child(&div)?;
+        let button = document
+            .create_element("button")?
+            .dyn_into::<HtmlButtonElement>()?;
+        button.set_type("submit");
+        button.set_class_name("btn btn-success col-1 me-2");
+        button.set_text_content(Some("Go"));
+        row.append_child(&button)?;
+        let button = document
+            .create_element("button")?
+            .dyn_into::<HtmlButtonElement>()?;
+        button.set_type("button");
+        button.set_class_name("btn btn-danger col-1");
+        button.set_text_content(Some("Delete"));
+        row.append_child(&button)?;
+        playlists_element.append_child(&row)?;
+    }
     Ok(())
 }
 
@@ -179,13 +284,13 @@ fn refresh_state(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), Js
     scores.scores.sort_by_key(|s| -s.score);
     let scores1 = document
         .get_element_by_id("scores1")
-        .ok_or(JsValue::from("scores element missing"))?;
+        .ok_or_else(|| JsValue::from("scores element missing"))?;
     while let Some(child) = scores1.first_element_child() {
         child.remove();
     }
     let scores2 = document
         .get_element_by_id("scores2")
-        .ok_or(JsValue::from("scores element missing"))?;
+        .ok_or_else(|| JsValue::from("scores element missing"))?;
     while let Some(child) = scores2.first_element_child() {
         child.remove();
     }
@@ -213,9 +318,7 @@ fn refresh_state(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), Js
         }
         row.append_child(&num)?;
         let track = document.create_element("td")?;
-        track.set_text_content(second_score.map(|s| {
-            s.track.as_ref()
-        }));
+        track.set_text_content(second_score.map(|s| s.track.as_ref()));
         row.append_child(&track)?;
         let record = document.create_element("td")?;
         if second_score.is_some() {
@@ -238,7 +341,7 @@ fn refresh_state(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), Js
     state.borrow_mut().score2 = scores[1].track_id.clone();
     document
         .get_element_by_id("iframe1")
-        .ok_or(JsValue::from("iframe1 element missing"))?
+        .ok_or_else(|| JsValue::from("iframe1 element missing"))?
         .dyn_into::<HtmlIFrameElement>()?
         .set_src(&format!(
             "https://open.spotify.com/embed/track/{}?utm_source=generator",
@@ -246,7 +349,7 @@ fn refresh_state(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), Js
         ));
     document
         .get_element_by_id("iframe2")
-        .ok_or(JsValue::from("iframe2 element missing"))?
+        .ok_or_else(|| JsValue::from("iframe2 element missing"))?
         .dyn_into::<HtmlIFrameElement>()?
         .set_src(&format!(
             "https://open.spotify.com/embed/track/{}?utm_source=generator",
@@ -254,11 +357,11 @@ fn refresh_state(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), Js
         ));
     document
         .get_element_by_id("track1")
-        .ok_or(JsValue::from("track1 element missing"))?
+        .ok_or_else(|| JsValue::from("track1 element missing"))?
         .set_text_content(Some(&scores[0].track));
     document
         .get_element_by_id("track2")
-        .ok_or(JsValue::from("track2 element missing"))?
+        .ok_or_else(|| JsValue::from("track2 element missing"))?
         .set_text_content(Some(&scores[1].track));
     Ok(())
 }
@@ -267,7 +370,7 @@ fn query(url: &str, auth: &str) -> Result<Request, JsValue> {
     let mut opts = RequestInit::new();
     opts.method("GET");
     opts.mode(RequestMode::Cors);
-    let request = Request::new_with_str_and_init(&url, &opts)?;
+    let request = Request::new_with_str_and_init(url, &opts)?;
     request
         .headers()
         .set("Authorization", &format!("Basic {}", auth))?;
