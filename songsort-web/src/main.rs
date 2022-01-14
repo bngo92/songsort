@@ -1,7 +1,8 @@
 use azure_core::Context;
 use azure_cosmos::prelude::{
     AuthorizationToken, CollectionClient, CosmosClient, CosmosEntity, CosmosOptions,
-    CreateDocumentOptions, DatabaseClient, Query, ReplaceDocumentOptions,
+    CreateDocumentOptions, DatabaseClient, DeleteDocumentOptions, GetDocumentOptions,
+    GetDocumentResponse, Query, ReplaceDocumentOptions,
 };
 use azure_cosmos::responses::{
     QueryDocumentsResponse, QueryDocumentsResponseDocuments, QueryResult,
@@ -95,6 +96,10 @@ async fn route(db: CosmosClient, req: Request<Body>) -> Result<Response<Body>, E
                     "Access-Control-Allow-Headers",
                     HeaderValue::from_static("Authorization"),
                 )
+                .header(
+                    "Access-Control-Allow-Methods",
+                    HeaderValue::from_static("GET,POST,DELETE"),
+                )
                 .status(StatusCode::OK)
                 .body(Body::empty())
                 .map_err(Error::from);
@@ -113,7 +118,7 @@ async fn route(db: CosmosClient, req: Request<Body>) -> Result<Response<Body>, E
                 .map_err(Error::from);
         }
         match (&path[..], req.method()) {
-            (["login"], _) => get_response_builder()
+            (["login"], &Method::POST) => get_response_builder()
                 .header(
                     "Access-Control-Allow-Headers",
                     HeaderValue::from_static("Authorization"),
@@ -122,14 +127,15 @@ async fn route(db: CosmosClient, req: Request<Body>) -> Result<Response<Body>, E
                 .body(Body::empty())
                 .map_err(Error::from),
             (["playlists"], &Method::GET) => get_playlists(db, user_id).await,
-            ([playlist_id], &Method::POST) => import_playlist(db, user_id, playlist_id).await,
-            ([path], &Method::GET) => {
-                if let Some(query) = req.uri().query() {
-                    elo(db, user_id, path, query).await
-                } else {
-                    get_scores(db, user_id, path).await
-                }
+            (["playlists", playlist_id], &Method::POST) => {
+                import_playlist(db, user_id, playlist_id).await
             }
+            (["playlists", id], &Method::DELETE) => delete_playlist(db, user_id, id).await,
+            (["playlists", id, "scores"], &Method::GET) => get_scores_by_id(db, user_id, id).await,
+            (["elo"], &Method::POST) => elo(db, user_id, req.uri().query()).await,
+            ([playlist_id], &Method::POST) => import_playlist(db, user_id, playlist_id).await, // TODO: deprecate
+            // TODO: deprecate
+            ([path], &Method::GET) => get_scores(db, user_id, path).await,
             (_, _) => get_response_builder()
                 .status(StatusCode::METHOD_NOT_ALLOWED)
                 .body(Body::empty())
@@ -151,50 +157,38 @@ async fn get_playlists(db: DatabaseClient, user_id: String) -> Result<Response<B
     let db = db.into_collection_client("playlists");
     let query = format!("SELECT * FROM c WHERE c.user_id = \"{}\"", user_id);
     let query = Query::new(&query);
-    let resp: QueryDocumentsResponse<Playlist> = db.query_documents().execute(&query).await?;
-    let playlist = Playlists {
-        items: resp
-            .results
-            .into_iter()
-            .map(|r| {
-                if let QueryResult::Document(d) = r {
-                    d.result
-                } else {
-                    todo!()
-                }
-            })
-            .collect(),
+    let resp =
+        QueryDocumentsResponseDocuments::try_from(db.query_documents().execute(&query).await?)?;
+    let playlists = Playlists {
+        items: resp.results.into_iter().map(|r| r.result).collect(),
     };
     get_response_builder()
-        .body(Body::from(serde_json::to_string(&playlist)?))
+        .body(Body::from(serde_json::to_string(&playlists)?))
         .map_err(Error::from)
 }
 
-/*async fn get_playlist(db: DatabaseClient, playlist_id: String) -> Result<Response<Body>, Error> {
-    let db = db
-        .into_collection_client("playlists")
-        .into_document_client(playlist_id, &playlist_id)?;
-    if let GetDocumentResponse::Found(playlist) = db
-        .get_document::<Score>(Context::new(), GetDocumentOptions::new())
-        .await?
-    {
-        let playlist = playlist.document;
-        get_response_builder()
-            .body(Body::from(serde_json::to_string(&playlist)?))
-            .map_err(Error::from)
-    } else {
-        todo!()
-    }
-}*/
+async fn delete_playlist(
+    db: DatabaseClient,
+    user_id: String,
+    id: &str,
+) -> Result<Response<Body>, Error> {
+    db.into_collection_client("playlists")
+        .into_document_client(id, &user_id)?
+        .delete_document(Context::new(), DeleteDocumentOptions::new())
+        .await?;
+    get_response_builder()
+        .status(StatusCode::NO_CONTENT)
+        .body(Body::empty())
+        .map_err(Error::from)
+}
 
 async fn elo(
     db: DatabaseClient,
     user_id: String,
-    playlist_id: &str,
-    query: &str,
+    query: Option<&str>,
 ) -> Result<Response<Body>, Error> {
-    let client = db.clone().into_collection_client("scores");
-    if let Some((win, lose)) = query.split_once('&') {
+    if let Some((win, lose)) = query.and_then(|s| s.split_once('&')) {
+        let client = db.clone().into_collection_client("scores");
         let scores = get_score_docs(client.clone(), user_id.clone(), &[win, lose]).await?;
         let mut iter = scores.into_iter();
         if let (Some(win_score), Some(lose_score)) = (iter.next(), iter.next()) {
@@ -227,19 +221,22 @@ async fn elo(
                 ),
             )
             .await?;
+            get_response_builder()
+                .status(StatusCode::OK)
+                .body(Body::empty())
+                .map_err(Error::from)
         } else {
-            return get_response_builder()
+            get_response_builder()
                 .status(StatusCode::BAD_REQUEST)
                 .body(Body::empty())
-                .map_err(Error::from);
+                .map_err(Error::from)
         }
     } else {
-        return get_response_builder()
+        get_response_builder()
             .status(StatusCode::BAD_REQUEST)
             .body(Body::empty())
-            .map_err(Error::from);
+            .map_err(Error::from)
     }
-    get_scores(db, user_id, playlist_id).await
 }
 
 async fn get_score_docs(
@@ -271,6 +268,46 @@ async fn get_score_docs(
         .collect())
 }
 
+async fn get_scores_by_id(
+    db: DatabaseClient,
+    user_id: String,
+    id: &str,
+) -> Result<Response<Body>, Error> {
+    let client = db
+        .clone()
+        .into_collection_client("playlists")
+        .into_document_client(id, &user_id)?;
+    let playlist = if let GetDocumentResponse::Found(playlist) = client
+        .get_document::<Playlist>(Context::new(), GetDocumentOptions::new())
+        .await?
+    {
+        playlist.document.document
+    } else {
+        todo!()
+    };
+
+    let db = db.into_collection_client("scores");
+    let query = format!(
+        "SELECT * FROM c WHERE c.user_id = \"{}\" AND c.track_id IN ({})",
+        user_id,
+        playlist
+            .tracks
+            .iter()
+            .map(|t| format!("\"{}\"", t))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let query = Query::new(&query);
+    let resp =
+        QueryDocumentsResponseDocuments::try_from(db.query_documents().execute(&query).await?)?;
+    let scores = Scores {
+        scores: resp.results.into_iter().map(|r| r.result).collect(),
+    };
+    get_response_builder()
+        .body(Body::from(serde_json::to_string(&scores)?))
+        .map_err(Error::from)
+}
+
 async fn get_scores(
     db: DatabaseClient,
     user_id: String,
@@ -281,20 +318,11 @@ async fn get_scores(
         "SELECT * FROM c WHERE c.user_id = \"{}\" AND c.playlist_id = \"{}\"",
         user_id, playlist_id
     );
-    let resp: QueryDocumentsResponse<Playlist> =
-        playlists.query_documents().execute(&query).await?;
+    let resp = QueryDocumentsResponseDocuments::try_from(
+        playlists.query_documents().execute(&query).await?,
+    )?;
     let playlist = Playlists {
-        items: resp
-            .results
-            .into_iter()
-            .map(|r| {
-                if let QueryResult::Document(d) = r {
-                    d.result
-                } else {
-                    todo!()
-                }
-            })
-            .collect(),
+        items: resp.results.into_iter().map(|r| r.result).collect(),
     };
 
     let db = db.into_collection_client("scores");
