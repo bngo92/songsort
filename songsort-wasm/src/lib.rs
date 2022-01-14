@@ -75,7 +75,7 @@ pub async fn run() -> Result<(), JsValue> {
         wasm_bindgen_futures::spawn_local(async {
             let window = web_sys::window().expect("no global `window` exists");
             let document = window.document().expect("should have a document on window");
-            let request = query("https://branlandapp.com/api/login", &state.borrow().auth).unwrap();
+            let request = query("https://branlandapp.com/api/login", "POST", &state.borrow().auth).unwrap();
             let resp_value = JsFuture::from(window.fetch_with_request(&request))
                 .await
                 .unwrap();
@@ -184,14 +184,7 @@ async fn generate_playlists_page(state: Rc<RefCell<State>>) -> Result<(), JsValu
                 .dyn_into::<HtmlInputElement>()
                 .unwrap();
             let url = format!("https://branlandapp.com/api/{}", input.value());
-            let mut opts = RequestInit::new();
-            opts.method("POST");
-            opts.mode(RequestMode::Cors);
-            let request = Request::new_with_str_and_init(&url, &opts).unwrap();
-            request
-                .headers()
-                .set("Authorization", &format!("Basic {}", state.borrow().auth))
-                .unwrap();
+            let request = query(&url, "POST", &state.borrow().auth).unwrap();
             let resp_value = JsFuture::from(window.fetch_with_request(&request))
                 .await
                 .unwrap();
@@ -206,7 +199,7 @@ async fn generate_playlists_page(state: Rc<RefCell<State>>) -> Result<(), JsValu
 
 async fn play(state: Rc<RefCell<State>>, url: String) -> Result<(), JsValue> {
     let window = web_sys::window().expect("no global `window` exists");
-    let request = query(&url, &state.borrow().auth)?;
+    let request = query(&url, "GET", &state.borrow().auth)?;
     let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
     let resp: Response = resp_value.dyn_into()?;
     let json = JsFuture::from(resp.json()?).await?;
@@ -223,6 +216,7 @@ async fn load_playlists(
     let document = window.document().expect("should have a document on window");
     let request = query(
         "https://branlandapp.com/api/playlists",
+        "GET",
         &state.borrow().auth,
     )?;
     let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
@@ -366,9 +360,9 @@ fn refresh_state(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), Js
     Ok(())
 }
 
-fn query(url: &str, auth: &str) -> Result<Request, JsValue> {
+fn query(url: &str, method: &str, auth: &str) -> Result<Request, JsValue> {
     let mut opts = RequestInit::new();
-    opts.method("GET");
+    opts.method(method);
     opts.mode(RequestMode::Cors);
     let request = Request::new_with_str_and_init(url, &opts)?;
     request
