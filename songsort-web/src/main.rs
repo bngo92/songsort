@@ -437,7 +437,20 @@ async fn import_playlist(
         };
         score_client
             .create_document(Context::new(), &score, CreateDocumentOptions::new())
-            .await?;
+            .await
+            .map(|_| ())
+            .or_else(|e| {
+                if let azure_cosmos::Error::Core(azure_core::Error::PolicyError(ref e)) = e {
+                    if let Some(azure_core::HttpError::ErrorStatusCode {
+                        status: StatusCode::CONFLICT,
+                        ..
+                    }) = e.downcast_ref::<azure_core::HttpError>()
+                    {
+                        return Ok(());
+                    }
+                }
+                Err(e)
+            })?;
     }
     get_response_builder()
         .status(StatusCode::CREATED)
