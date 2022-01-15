@@ -7,7 +7,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    Element, HtmlAnchorElement, HtmlButtonElement, HtmlIFrameElement, HtmlInputElement, Request,
+    HtmlAnchorElement, HtmlButtonElement, HtmlIFrameElement, HtmlInputElement, Request,
     RequestInit, RequestMode, Response,
 };
 
@@ -75,7 +75,12 @@ pub async fn run() -> Result<(), JsValue> {
         wasm_bindgen_futures::spawn_local(async {
             let window = web_sys::window().expect("no global `window` exists");
             let document = window.document().expect("should have a document on window");
-            let request = query("https://branlandapp.com/api/login", "POST", &state.borrow().auth).unwrap();
+            let request = query(
+                "https://branlandapp.com/api/login",
+                "POST",
+                &state.borrow().auth,
+            )
+            .unwrap();
             let resp_value = JsFuture::from(window.fetch_with_request(&request))
                 .await
                 .unwrap();
@@ -147,13 +152,18 @@ async fn generate_playlists_page(state: Rc<RefCell<State>>) -> Result<(), JsValu
     let main = document
         .get_element_by_id("main")
         .ok_or_else(|| JsValue::from("main element missing"))?;
+    let home = document.create_element("div")?;
+    home.set_id("home");
     let header = document.create_element("h1")?;
     header.set_text_content(Some("Playlists"));
     main.append_child(&header)?;
     let form = document.create_element("form")?;
     let playlists = document.create_element("div")?;
-    load_playlists(Rc::clone(&state), &playlists).await?;
+    playlists.set_id("playlists");
     form.append_child(&playlists)?;
+    home.append_child(&form)?;
+    main.append_child(&home)?;
+    load_playlists(Rc::clone(&state)).await?;
     let row = document.create_element("div")?;
     row.set_class_name("row");
     let input = document
@@ -172,7 +182,6 @@ async fn generate_playlists_page(state: Rc<RefCell<State>>) -> Result<(), JsValu
     import.set_text_content(Some("Import"));
     row.append_child(&import)?;
     form.append_child(&row)?;
-    main.append_child(&form)?;
     let a = Closure::wrap(Box::new(move || {
         let state = Rc::clone(&state);
         wasm_bindgen_futures::spawn_local(async move {
@@ -189,7 +198,9 @@ async fn generate_playlists_page(state: Rc<RefCell<State>>) -> Result<(), JsValu
                 .await
                 .unwrap();
             let resp: Response = resp_value.dyn_into().unwrap();
-            if resp.status() == 200 {}
+            if resp.status() == 201 {
+                load_playlists(state).await;
+            }
         })
     }) as Box<dyn FnMut()>);
     import.set_onclick(Some(a.as_ref().unchecked_ref()));
@@ -208,12 +219,12 @@ async fn play(state: Rc<RefCell<State>>, url: String) -> Result<(), JsValue> {
     Ok(())
 }
 
-async fn load_playlists(
-    state: Rc<RefCell<State>>,
-    playlists_element: &Element,
-) -> Result<(), JsValue> {
+async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
     let window = web_sys::window().expect("no global `window` exists");
     let document = window.document().expect("should have a document on window");
+    let playlists_element = document
+        .get_element_by_id("playlists")
+        .ok_or_else(|| JsValue::from("playlists element missing"))?;
     let request = query(
         "https://branlandapp.com/api/playlists",
         "GET",
@@ -263,6 +274,22 @@ async fn load_playlists(
         button.set_type("button");
         button.set_class_name("btn btn-danger col-1");
         button.set_text_content(Some("Delete"));
+        let state_ref = Rc::clone(&state);
+        let a = Closure::wrap(Box::new(move || {
+            let state = Rc::clone(&state_ref);
+            let id = p.id.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let window = web_sys::window().expect("no global `window` exists");
+                let url = format!("https://branlandapp.com/api/playlists/{}", id);
+                let request = query(&url, "DELETE", &state.borrow().auth).unwrap();
+                JsFuture::from(window.fetch_with_request(&request))
+                    .await
+                    .unwrap();
+                load_playlists(state).await;
+            })
+        }) as Box<dyn FnMut()>);
+        button.set_onclick(Some(a.as_ref().unchecked_ref()));
+        a.forget();
         row.append_child(&button)?;
         playlists_element.append_child(&row)?;
     }
