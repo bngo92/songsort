@@ -4,7 +4,6 @@ use azure_cosmos::prelude::{
     CosmosOptions, CreateDocumentOptions, DatabaseClient, DeleteDocumentOptions,
     GetDocumentOptions, GetDocumentResponse, Query, ReplaceDocumentOptions,
 };
-use azure_cosmos::responses::QueryDocumentsResponseDocuments;
 use hyper::header::HeaderValue;
 use hyper::http::response::Builder;
 use hyper::service::{make_service_fn, service_fn};
@@ -135,20 +134,16 @@ async fn route(
                 .status(StatusCode::OK)
                 .body(Body::empty())
                 .map_err(Error::from),
-            (["playlists"], &Method::GET) => get_playlists(db, user_id, session).await,
+            (["playlists"], &Method::GET) => get_playlists(db, session, user_id).await,
             (["playlists", playlist_id], &Method::POST) => {
-                import_playlist(db, user_id, playlist_id, session).await
+                import_playlist(db, session, user_id, playlist_id).await
             }
-            (["playlists", id], &Method::DELETE) => delete_playlist(db, user_id, id, session).await,
+            (["playlists", id], &Method::DELETE) => delete_playlist(db, session, user_id, id).await,
             (["playlists", id, "scores"], &Method::GET) => {
-                get_scores_by_id(db, user_id, id, session).await
+                get_playlist_scores(db, session, user_id, id).await
             }
-            (["elo"], &Method::POST) => elo(db, user_id, req.uri().query(), session).await,
-            ([playlist_id], &Method::POST) => {
-                import_playlist(db, user_id, playlist_id, session).await
-            } // TODO: deprecate
-            // TODO: deprecate
-            ([path], &Method::GET) => get_scores(db, user_id, path).await,
+            (["elo"], &Method::POST) => elo(db, session, user_id, req.uri().query()).await,
+            (["scores"], &Method::GET) => get_scores(db, session, user_id).await,
             (_, _) => get_response_builder()
                 .status(StatusCode::METHOD_NOT_ALLOWED)
                 .body(Body::empty())
@@ -168,8 +163,8 @@ async fn route(
 
 async fn get_playlists(
     db: DatabaseClient,
-    user_id: String,
     session: Arc<RwLock<Option<ConsistencyLevel>>>,
+    user_id: String,
 ) -> Result<Response<Body>, Error> {
     let db = db.into_collection_client("playlists");
     let query = format!("SELECT * FROM c WHERE c.user_id = \"{}\"", user_id);
@@ -200,9 +195,9 @@ async fn get_playlists(
 
 async fn delete_playlist(
     db: DatabaseClient,
+    session: Arc<RwLock<Option<ConsistencyLevel>>>,
     user_id: String,
     id: &str,
-    session: Arc<RwLock<Option<ConsistencyLevel>>>,
 ) -> Result<Response<Body>, Error> {
     let session_copy = session.read().unwrap().clone();
     if let Some(session) = session_copy {
@@ -229,14 +224,14 @@ async fn delete_playlist(
 
 async fn elo(
     db: DatabaseClient,
+    session: Arc<RwLock<Option<ConsistencyLevel>>>,
     user_id: String,
     query: Option<&str>,
-    session: Arc<RwLock<Option<ConsistencyLevel>>>,
 ) -> Result<Response<Body>, Error> {
     if let Some((win, lose)) = query.and_then(|s| s.split_once('&')) {
         let client = db.clone().into_collection_client("scores");
         let scores =
-            get_score_docs(client.clone(), user_id.clone(), &[win, lose], &session).await?;
+            get_score_docs(client.clone(), &session, user_id.clone(), &[win, lose]).await?;
         let mut iter = scores.into_iter();
         if let (Some(win_score), Some(lose_score)) = (iter.next(), iter.next()) {
             let (mut win_score, mut lose_score) = if win_score.track_id == win {
@@ -297,9 +292,9 @@ async fn elo(
 
 async fn get_score_docs(
     db: CollectionClient,
+    session: &Arc<RwLock<Option<ConsistencyLevel>>>,
     user_id: String,
     track_ids: &[&str],
-    session: &Arc<RwLock<Option<ConsistencyLevel>>>,
 ) -> Result<Vec<Score>, Error> {
     let query = format!(
         "SELECT * FROM c WHERE c.user_id = \"{}\" AND c.track_id IN ({})",
@@ -330,11 +325,11 @@ async fn get_score_docs(
         .collect())
 }
 
-async fn get_scores_by_id(
+async fn get_playlist_scores(
     db: DatabaseClient,
+    session: Arc<RwLock<Option<ConsistencyLevel>>>,
     user_id: String,
     id: &str,
-    session: Arc<RwLock<Option<ConsistencyLevel>>>,
 ) -> Result<Response<Body>, Error> {
     let client = db
         .clone()
@@ -387,37 +382,29 @@ async fn get_scores_by_id(
 
 async fn get_scores(
     db: DatabaseClient,
+    session: Arc<RwLock<Option<ConsistencyLevel>>>,
     user_id: String,
-    playlist_id: &str,
 ) -> Result<Response<Body>, Error> {
-    let playlists = db.clone().into_collection_client("playlists");
-    let query = format!(
-        "SELECT * FROM c WHERE c.user_id = \"{}\" AND c.playlist_id = \"{}\"",
-        user_id, playlist_id
-    );
-    let resp = QueryDocumentsResponseDocuments::try_from(
-        playlists.query_documents().execute(&query).await?,
-    )?;
-    let playlist = Playlists {
-        items: resp.results.into_iter().map(|r| r.result).collect(),
-    };
-
     let db = db.into_collection_client("scores");
-    let query = format!(
-        "SELECT * FROM c WHERE c.user_id = \"{}\" AND c.track_id IN ({})",
-        user_id,
-        playlist.items[0]
-            .tracks
-            .iter()
-            .map(|t| format!("\"{}\"", t))
-            .collect::<Vec<_>>()
-            .join(",")
-    );
-    let query = Query::new(&query);
-    let resp =
-        QueryDocumentsResponseDocuments::try_from(db.query_documents().execute(&query).await?)?;
+    let query = format!("SELECT * FROM c WHERE c.user_id = \"{}\"", user_id);
+    let session_copy = session.read().unwrap().clone();
+    let resp = if let Some(session) = session_copy {
+        db.query_documents()
+            .consistency_level(session)
+            .execute(&query)
+            .await?
+    } else {
+        let resp = db.query_documents().execute(&query).await?;
+        *session.write().unwrap() = Some(ConsistencyLevel::Session(resp.session_token.clone()));
+        resp
+    };
     let scores = Scores {
-        scores: resp.results.into_iter().map(|r| r.result).collect(),
+        scores: resp
+            .into_documents()?
+            .results
+            .into_iter()
+            .map(|r| r.result)
+            .collect(),
     };
     get_response_builder()
         .body(Body::from(serde_json::to_string(&scores)?))
@@ -426,9 +413,9 @@ async fn get_scores(
 
 async fn import_playlist(
     db: DatabaseClient,
+    session: Arc<RwLock<Option<ConsistencyLevel>>>,
     user_id: String,
     playlist_id: &str,
-    session: Arc<RwLock<Option<ConsistencyLevel>>>,
 ) -> Result<Response<Body>, Error> {
     let https = HttpsConnector::new();
     let client = Client::builder().build::<_, hyper::Body>(https);
