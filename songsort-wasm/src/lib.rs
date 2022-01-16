@@ -7,8 +7,8 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    HtmlAnchorElement, HtmlButtonElement, HtmlIFrameElement, HtmlInputElement, Request,
-    RequestInit, RequestMode, Response,
+    Document, Element, HtmlAnchorElement, HtmlButtonElement, HtmlIFrameElement, HtmlInputElement,
+    Request, RequestInit, RequestMode, Response,
 };
 
 #[derive(Deserialize)]
@@ -41,11 +41,10 @@ pub struct Playlist {
     pub tracks: Vec<String>,
 }
 
-pub struct State {
-    pub playlist: String,
-    pub score1: String,
-    pub score2: String,
-    pub auth: String,
+struct State {
+    playlist: Option<String>,
+    auth: String,
+    home: Option<Element>,
 }
 
 // Called by our JS entry point to run the example
@@ -54,10 +53,9 @@ pub async fn run() -> Result<(), JsValue> {
     let window = web_sys::window().expect("no global `window` exists");
     let document = window.document().expect("should have a document on window");
     let state = Rc::new(RefCell::new(State {
-        playlist: String::from("5jPjYAdQO0MgzHdwSmYPNZ"),
-        score1: String::new(),
-        score2: String::new(),
+        playlist: None,
         auth: String::new(),
+        home: None,
     }));
     let state_ref = Rc::clone(&state);
     let username = document
@@ -108,41 +106,6 @@ pub async fn run() -> Result<(), JsValue> {
         .dyn_into::<HtmlButtonElement>()?
         .set_onclick(Some(a.as_ref().unchecked_ref()));
     a.forget();
-    /*let state_ref = Rc::clone(&state);
-    let a = Closure::wrap(Box::new(move || {
-        let state = Rc::clone(&state_ref);
-        let url = format!(
-            "https://branlandapp.com/api/{}?{}&{}",
-            state.borrow().playlist,
-            state.borrow().score1,
-            state.borrow().score2
-        );
-        wasm_bindgen_futures::spawn_local((async || play(state, url).await.unwrap())())
-    }) as Box<dyn FnMut()>);
-    document
-        .get_element_by_id("score1")
-        .ok_or_else(||JsValue::from("score1 element missing"))?
-        .dyn_into::<HtmlButtonElement>()?
-        .set_onclick(Some(a.as_ref().unchecked_ref()));
-    a.forget();
-    let state_ref = Rc::clone(&state);
-    let a = Closure::wrap(Box::new(move || {
-        let state = Rc::clone(&state_ref);
-        let url = format!(
-            "https://branlandapp.com/api/{}?{}&{}",
-            state.borrow().playlist,
-            state.borrow().score2,
-            state.borrow().score1
-        );
-        wasm_bindgen_futures::spawn_local((async || play(state, url).await.unwrap())())
-    }) as Box<dyn FnMut()>);
-    document
-        .get_element_by_id("score2")
-        .ok_or_else(||JsValue::from("score2 element missing"))?
-        .dyn_into::<HtmlButtonElement>()?
-        .set_onclick(Some(a.as_ref().unchecked_ref()));
-    a.forget();*/
-
     Ok(())
 }
 
@@ -156,7 +119,7 @@ async fn generate_playlists_page(state: Rc<RefCell<State>>) -> Result<(), JsValu
     home.set_id("home");
     let header = document.create_element("h1")?;
     header.set_text_content(Some("Playlists"));
-    main.append_child(&header)?;
+    home.append_child(&header)?;
     let form = document.create_element("form")?;
     let playlists = document.create_element("div")?;
     playlists.set_id("playlists");
@@ -208,17 +171,6 @@ async fn generate_playlists_page(state: Rc<RefCell<State>>) -> Result<(), JsValu
     Ok(())
 }
 
-async fn play(state: Rc<RefCell<State>>, url: String) -> Result<(), JsValue> {
-    let window = web_sys::window().expect("no global `window` exists");
-    let request = query(&url, "GET", &state.borrow().auth)?;
-    let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
-    let resp: Response = resp_value.dyn_into()?;
-    let json = JsFuture::from(resp.json()?).await?;
-    let scores: Scores = json.into_serde().unwrap();
-    refresh_state(state, scores)?;
-    Ok(())
-}
-
 async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
     let window = web_sys::window().expect("no global `window` exists");
     let document = window.document().expect("should have a document on window");
@@ -264,9 +216,29 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
         let button = document
             .create_element("button")?
             .dyn_into::<HtmlButtonElement>()?;
-        button.set_type("submit");
+        button.set_type("button");
         button.set_class_name("btn btn-success col-1 me-2");
         button.set_text_content(Some("Go"));
+        let state_ref = Rc::clone(&state);
+        let id = p.id.clone();
+        let a = Closure::wrap(Box::new(move || {
+            let state = Rc::clone(&state_ref);
+            let id = id.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let window = web_sys::window().expect("no global `window` exists");
+                let url = format!("https://branlandapp.com/api/playlists/{}/scores", id);
+                let request = query(&url, "GET", &state.borrow().auth).unwrap();
+                let resp_value = JsFuture::from(window.fetch_with_request(&request))
+                    .await
+                    .unwrap();
+                let resp: Response = resp_value.dyn_into().unwrap();
+                let json = JsFuture::from(resp.json().unwrap()).await.unwrap();
+                let scores: Scores = json.into_serde().unwrap();
+                generate_random_page(state, scores, id);
+            });
+        }) as Box<dyn FnMut()>);
+        button.set_onclick(Some(a.as_ref().unchecked_ref()));
+        a.forget();
         row.append_child(&button)?;
         let button = document
             .create_element("button")?
@@ -296,10 +268,123 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
     Ok(())
 }
 
-fn refresh_state(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), JsValue> {
-    if scores.scores.is_empty() {
+fn generate_random_page(
+    state: Rc<RefCell<State>>,
+    scores: Scores,
+    id: String,
+) -> Result<(), JsValue> {
+    let window = web_sys::window().expect("no global `window` exists");
+    let document = window.document().expect("should have a document on window");
+    if scores.scores.len() < 2 {
+        window
+            .alert_with_message("Playlist has less than 2 songs")
+            .expect("alert");
         return Ok(());
     }
+    state.borrow_mut().playlist = Some(id);
+    let main = document
+        .get_element_by_id("main")
+        .ok_or_else(|| JsValue::from("main element missing"))?;
+    let random = document.create_element("div")?;
+    random.set_id("random");
+    let header = document.create_element("h1")?;
+    header.set_text_content(Some("Random match"));
+    random.append_child(&header)?;
+    let row = document.create_element("div")?;
+    row.set_class_name("row");
+    let left = document.create_element("div")?;
+    left.set_class_name("col-6");
+    let iframe1 = document
+        .create_element("iframe")?
+        .dyn_into::<HtmlIFrameElement>()?;
+    iframe1.set_id("iframe1");
+    iframe1.set_width("100%");
+    iframe1.set_height("380");
+    iframe1.set_frame_border("0");
+    left.append_child(&iframe1)?;
+    let score1 = document
+        .create_element("button")?
+        .dyn_into::<HtmlButtonElement>()?;
+    score1.set_type("button");
+    score1.set_id("score1");
+    score1.set_class_name("btn btn-info width");
+    let track1 = document.create_element("div")?;
+    track1.set_id("track1");
+    track1.set_class_name("truncate");
+    score1.append_child(&track1)?;
+    left.append_child(&score1)?;
+    row.append_child(&left)?;
+    random.append_child(&row)?;
+    let right = document.create_element("div")?;
+    right.set_class_name("col-6");
+    let iframe2 = document
+        .create_element("iframe")?
+        .dyn_into::<HtmlIFrameElement>()?;
+    iframe2.set_id("iframe2");
+    iframe2.set_width("100%");
+    iframe2.set_height("380");
+    iframe2.set_frame_border("0");
+    right.append_child(&iframe2)?;
+    let score2 = document
+        .create_element("button")?
+        .dyn_into::<HtmlButtonElement>()?;
+    score2.set_type("button");
+    score2.set_id("score2");
+    score2.set_class_name("btn btn-warning width");
+    let track2 = document.create_element("div")?;
+    track2.set_id("track2");
+    track2.set_class_name("truncate");
+    score2.append_child(&track2)?;
+    right.append_child(&score2)?;
+    row.append_child(&right)?;
+    random.append_child(&row)?;
+    let row = document.create_element("div")?;
+    row.set_class_name("row");
+    let left = document.create_element("div")?;
+    left.set_class_name("col-6");
+    let table = document.create_element("table")?;
+    table.set_class_name("table table-striped");
+    let head = document.create_element("thead")?;
+    let tr = document.create_element("tr")?;
+    tr.append_child(create_th(&document, "col-1", "#")?.as_ref())?;
+    tr.append_child(create_th(&document, "col-8", "Track")?.as_ref())?;
+    tr.append_child(create_th(&document, "", "Record")?.as_ref())?;
+    tr.append_child(create_th(&document, "", "Score")?.as_ref())?;
+    head.append_child(&tr)?;
+    table.append_child(&head)?;
+    let body = document.create_element("tbody")?;
+    body.set_id("scores1");
+    table.append_child(&body)?;
+    left.append_child(&table)?;
+    row.append_child(&left)?;
+    let right = document.create_element("div")?;
+    right.set_class_name("col-6");
+    let table = document.create_element("table")?;
+    table.set_class_name("table table-striped");
+    let head = document.create_element("thead")?;
+    let tr = document.create_element("tr")?;
+    tr.append_child(create_th(&document, "col-1", "#")?.as_ref())?;
+    tr.append_child(create_th(&document, "col-8", "Track")?.as_ref())?;
+    tr.append_child(create_th(&document, "", "Record")?.as_ref())?;
+    tr.append_child(create_th(&document, "", "Score")?.as_ref())?;
+    head.append_child(&tr)?;
+    table.append_child(&head)?;
+    let body = document.create_element("tbody")?;
+    body.set_id("scores2");
+    table.append_child(&body)?;
+    right.append_child(&table)?;
+    row.append_child(&right)?;
+    random.append_child(&row)?;
+    if let Some(child) = main.first_element_child() {
+        child.remove();
+        state.borrow_mut().home = Some(child);
+    }
+    main.append_child(&random)?;
+    refresh_scores(state, scores)?;
+    Ok(())
+}
+
+fn refresh_scores(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), JsValue> {
     let window = web_sys::window().expect("no global `window` exists");
     let document = window.document().expect("should have a document on window");
     scores.scores.sort_by_key(|s| -s.score);
@@ -343,7 +428,7 @@ fn refresh_state(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), Js
         row.append_child(&track)?;
         let record = document.create_element("td")?;
         if second_score.is_some() {
-            record.set_text_content(Some(&format!("{}-{}", scores[0].wins, scores[0].losses)));
+            record.set_text_content(Some(&format!("{}-{}", scores[1].wins, scores[1].losses)));
         }
         row.append_child(&record)?;
         let score_element = document.create_element("td")?;
@@ -358,8 +443,34 @@ fn refresh_state(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), Js
         .scores
         .choose_multiple(&mut rand::thread_rng(), 2)
         .collect();
-    state.borrow_mut().score1 = scores[0].track_id.clone();
-    state.borrow_mut().score2 = scores[1].track_id.clone();
+    let track1 = scores[0].track_id.clone();
+    let track2 = scores[1].track_id.clone();
+    let state_ref = Rc::clone(&state);
+    let url = format!("https://branlandapp.com/api/elo?{}&{}", track1, track2);
+    let a = Closure::wrap(Box::new(move || {
+        let state = Rc::clone(&state_ref);
+        let url = url.clone();
+        wasm_bindgen_futures::spawn_local(async { elo(state, url).await.unwrap() })
+    }) as Box<dyn FnMut()>);
+    document
+        .get_element_by_id("score1")
+        .ok_or_else(|| JsValue::from("score1 element missing"))?
+        .dyn_into::<HtmlButtonElement>()?
+        .set_onclick(Some(a.as_ref().unchecked_ref()));
+    a.forget();
+    let state_ref = Rc::clone(&state);
+    let url = format!("https://branlandapp.com/api/elo?{}&{}", track2, track1);
+    let a = Closure::wrap(Box::new(move || {
+        let state = Rc::clone(&state_ref);
+        let url = url.clone();
+        wasm_bindgen_futures::spawn_local(async { elo(state, url).await.unwrap() })
+    }) as Box<dyn FnMut()>);
+    document
+        .get_element_by_id("score2")
+        .ok_or_else(|| JsValue::from("score2 element missing"))?
+        .dyn_into::<HtmlButtonElement>()?
+        .set_onclick(Some(a.as_ref().unchecked_ref()));
+    a.forget();
     document
         .get_element_by_id("iframe1")
         .ok_or_else(|| JsValue::from("iframe1 element missing"))?
@@ -387,6 +498,23 @@ fn refresh_state(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), Js
     Ok(())
 }
 
+async fn elo(state: Rc<RefCell<State>>, url: String) -> Result<(), JsValue> {
+    let window = web_sys::window().expect("no global `window` exists");
+    let request = query(&url, "POST", &state.borrow().auth)?;
+    JsFuture::from(window.fetch_with_request(&request)).await?;
+    let url = format!(
+        "https://branlandapp.com/api/playlists/{}/scores",
+        state.borrow().playlist.as_deref().expect("playlist")
+    );
+    let request = query(&url, "GET", &state.borrow().auth)?;
+    let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
+    let resp: Response = resp_value.dyn_into()?;
+    let json = JsFuture::from(resp.json()?).await?;
+    let scores: Scores = json.into_serde().unwrap();
+    refresh_scores(state, scores)?;
+    Ok(())
+}
+
 fn query(url: &str, method: &str, auth: &str) -> Result<Request, JsValue> {
     let mut opts = RequestInit::new();
     opts.method(method);
@@ -396,4 +524,11 @@ fn query(url: &str, method: &str, auth: &str) -> Result<Request, JsValue> {
         .headers()
         .set("Authorization", &format!("Basic {}", auth))?;
     Ok(request)
+}
+
+fn create_th(document: &Document, class: &str, text: &str) -> Result<Element, JsValue> {
+    let th = document.create_element("th")?;
+    th.set_class_name(class);
+    th.set_text_content(Some(text));
+    Ok(th)
 }
