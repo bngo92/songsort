@@ -22,6 +22,8 @@ pub struct Score {
     pub id: String,
     pub track_id: String,
     pub track: String,
+    pub album: String,
+    pub artists: Vec<String>,
     pub user_id: String,
     pub score: i32,
     pub wins: i32,
