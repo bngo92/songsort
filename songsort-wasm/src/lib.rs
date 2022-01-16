@@ -1,5 +1,6 @@
 #![feature(async_closure)]
 use rand::prelude::SliceRandom;
+use regex::Regex;
 use serde::Deserialize;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -155,7 +156,12 @@ async fn generate_playlists_page(state: Rc<RefCell<State>>) -> Result<(), JsValu
                 .unwrap()
                 .dyn_into::<HtmlInputElement>()
                 .unwrap();
-            let url = format!("https://branlandapp.com/api/{}", input.value());
+            let mut input = input.value();
+            let re = Regex::new(r"https://open.spotify.com/playlist/([[:alnum:]]*)").unwrap();
+            if let Some(id) = re.captures_iter(&input).next() {
+                input = id[1].to_owned()
+            }
+            let url = format!("https://branlandapp.com/api/{}", input);
             let request = query(&url, "POST", &state.borrow().auth).unwrap();
             let resp_value = JsFuture::from(window.fetch_with_request(&request))
                 .await
@@ -164,6 +170,7 @@ async fn generate_playlists_page(state: Rc<RefCell<State>>) -> Result<(), JsValu
             if resp.status() == 201 {
                 load_playlists(state).await;
             }
+            // TODO: error handling
         })
     }) as Box<dyn FnMut()>);
     import.set_onclick(Some(a.as_ref().unchecked_ref()));
