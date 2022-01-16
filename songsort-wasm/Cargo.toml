@@ -23,6 +23,7 @@ features = [
   'Document',
   'Element',
   'HtmlAnchorElement',
+  'HtmlCollection',
   'HtmlElement',
   'HtmlIFrameElement',
   'HtmlInputElement',

@@ -189,81 +189,89 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
     while let Some(child) = playlists_element.first_element_child() {
         child.remove();
     }
-    for p in playlists.items {
-        let row = document.create_element("div")?;
-        row.set_class_name("row");
-        let label = document.create_element("label")?;
-        label.set_class_name("col-7 col-form-label");
-        let link = document
-            .create_element("a")?
-            .dyn_into::<HtmlAnchorElement>()?;
-        link.set_text_content(Some(&p.name));
-        link.set_href(&format!(
-            "https://open.spotify.com/playlist/{}",
-            p.playlist_id
+    if playlists.items.is_empty() {
+        let p = document.create_element("p")?;
+        p.set_text_content(Some(
+            "Import a playlist and choose an option to start sorting songs!",
         ));
-        label.append_child(&link)?;
-        row.append_child(&label)?;
-        let div = document.create_element("div")?;
-        div.set_class_name("col-2");
-        let select = document.create_element("select")?;
-        select.set_class_name("form-select");
-        let option = document.create_element("option")?;
-        option.set_text_content(Some("Random match"));
-        select.append_child(&option)?;
-        div.append_child(&select)?;
-        row.append_child(&div)?;
-        let button = document
-            .create_element("button")?
-            .dyn_into::<HtmlButtonElement>()?;
-        button.set_type("button");
-        button.set_class_name("btn btn-success col-1 me-2");
-        button.set_text_content(Some("Go"));
-        let state_ref = Rc::clone(&state);
-        let id = p.id.clone();
-        let a = Closure::wrap(Box::new(move || {
-            let state = Rc::clone(&state_ref);
-            let id = id.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                let window = web_sys::window().expect("no global `window` exists");
-                let url = format!("https://branlandapp.com/api/playlists/{}/scores", id);
-                let request = query(&url, "GET", &state.borrow().auth).unwrap();
-                let resp_value = JsFuture::from(window.fetch_with_request(&request))
-                    .await
-                    .unwrap();
-                let resp: Response = resp_value.dyn_into().unwrap();
-                let json = JsFuture::from(resp.json().unwrap()).await.unwrap();
-                let scores: Scores = json.into_serde().unwrap();
-                generate_random_page(state, scores, id);
-            });
-        }) as Box<dyn FnMut()>);
-        button.set_onclick(Some(a.as_ref().unchecked_ref()));
-        a.forget();
-        row.append_child(&button)?;
-        let button = document
-            .create_element("button")?
-            .dyn_into::<HtmlButtonElement>()?;
-        button.set_type("button");
-        button.set_class_name("btn btn-danger col-1");
-        button.set_text_content(Some("Delete"));
-        let state_ref = Rc::clone(&state);
-        let a = Closure::wrap(Box::new(move || {
-            let state = Rc::clone(&state_ref);
+        playlists_element.append_child(&p)?;
+    } else {
+        for p in playlists.items {
+            let row = document.create_element("div")?;
+            row.set_class_name("row");
+            let label = document.create_element("label")?;
+            label.set_class_name("col-7 col-form-label");
+            let link = document
+                .create_element("a")?
+                .dyn_into::<HtmlAnchorElement>()?;
+            link.set_text_content(Some(&p.name));
+            link.set_href(&format!(
+                "https://open.spotify.com/playlist/{}",
+                p.playlist_id
+            ));
+            label.append_child(&link)?;
+            row.append_child(&label)?;
+            let div = document.create_element("div")?;
+            div.set_class_name("col-2");
+            let select = document.create_element("select")?;
+            select.set_class_name("form-select");
+            let option = document.create_element("option")?;
+            option.set_text_content(Some("Random match"));
+            select.append_child(&option)?;
+            div.append_child(&select)?;
+            row.append_child(&div)?;
+            let button = document
+                .create_element("button")?
+                .dyn_into::<HtmlButtonElement>()?;
+            button.set_type("button");
+            button.set_class_name("btn btn-success col-1 me-2");
+            button.set_text_content(Some("Go"));
+            let state_ref = Rc::clone(&state);
             let id = p.id.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                let window = web_sys::window().expect("no global `window` exists");
-                let url = format!("https://branlandapp.com/api/playlists/{}", id);
-                let request = query(&url, "DELETE", &state.borrow().auth).unwrap();
-                JsFuture::from(window.fetch_with_request(&request))
-                    .await
-                    .unwrap();
-                load_playlists(state).await;
-            })
-        }) as Box<dyn FnMut()>);
-        button.set_onclick(Some(a.as_ref().unchecked_ref()));
-        a.forget();
-        row.append_child(&button)?;
-        playlists_element.append_child(&row)?;
+            let a = Closure::wrap(Box::new(move || {
+                let state = Rc::clone(&state_ref);
+                let id = id.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    let window = web_sys::window().expect("no global `window` exists");
+                    let url = format!("https://branlandapp.com/api/playlists/{}/scores", id);
+                    let request = query(&url, "GET", &state.borrow().auth).unwrap();
+                    let resp_value = JsFuture::from(window.fetch_with_request(&request))
+                        .await
+                        .unwrap();
+                    let resp: Response = resp_value.dyn_into().unwrap();
+                    let json = JsFuture::from(resp.json().unwrap()).await.unwrap();
+                    let scores: Scores = json.into_serde().unwrap();
+                    generate_random_page(state, scores, id);
+                });
+            }) as Box<dyn FnMut()>);
+            button.set_onclick(Some(a.as_ref().unchecked_ref()));
+            a.forget();
+            row.append_child(&button)?;
+            let button = document
+                .create_element("button")?
+                .dyn_into::<HtmlButtonElement>()?;
+            button.set_type("button");
+            button.set_class_name("btn btn-danger col-1");
+            button.set_text_content(Some("Delete"));
+            let state_ref = Rc::clone(&state);
+            let a = Closure::wrap(Box::new(move || {
+                let state = Rc::clone(&state_ref);
+                let id = p.id.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    let window = web_sys::window().expect("no global `window` exists");
+                    let url = format!("https://branlandapp.com/api/playlists/{}", id);
+                    let request = query(&url, "DELETE", &state.borrow().auth).unwrap();
+                    JsFuture::from(window.fetch_with_request(&request))
+                        .await
+                        .unwrap();
+                    load_playlists(state).await;
+                })
+            }) as Box<dyn FnMut()>);
+            button.set_onclick(Some(a.as_ref().unchecked_ref()));
+            a.forget();
+            row.append_child(&button)?;
+            playlists_element.append_child(&row)?;
+        }
     }
     Ok(())
 }
@@ -282,6 +290,26 @@ fn generate_random_page(
         return Ok(());
     }
     state.borrow_mut().playlist = Some(id);
+    let navbar = document
+        .get_element_by_id("navbar")
+        .ok_or_else(|| JsValue::from("navbar element missing"))?;
+    let ul = document.create_element("ul")?;
+    ul.set_class_name("navbar-nav flex-grow-1");
+    let li = document.create_element("li")?;
+    li.set_class_name("nav-item");
+    let item = document
+        .create_element("a")?
+        .dyn_into::<HtmlAnchorElement>()?;
+    item.set_class_name("nav-link");
+    item.set_href("#");
+    item.set_text_content(Some("Random match"));
+    li.append_child(&item)?;
+    ul.append_child(&li)?;
+    navbar
+        .children()
+        .item(0)
+        .expect("brand element missing")
+        .insert_adjacent_element("afterend", &ul)?;
     let main = document
         .get_element_by_id("main")
         .ok_or_else(|| JsValue::from("main element missing"))?;
