@@ -217,7 +217,7 @@ async fn delete_playlist(
             .into_document_client(id, &user_id)?
             .delete_document(Context::new(), DeleteDocumentOptions::new())
             .await?;
-        *session.write().unwrap() = Some(ConsistencyLevel::Session(resp.session_token.clone()));
+        *session.write().unwrap() = Some(ConsistencyLevel::Session(resp.session_token));
     }
     get_response_builder()
         .status(StatusCode::NO_CONTENT)
@@ -511,7 +511,7 @@ async fn import_playlist(
         let resp = playlist_client
             .create_document(Context::new(), &playlist, CreateDocumentOptions::new())
             .await?;
-        let session_copy = ConsistencyLevel::Session(resp.session_token.clone());
+        let session_copy = ConsistencyLevel::Session(resp.session_token);
         *session.write().unwrap() = Some(session_copy.clone());
         session_copy
     };
