@@ -1,12 +1,10 @@
 use azure_core::Context;
 use azure_cosmos::prelude::{
-    AuthorizationToken, CollectionClient, CosmosClient, CosmosEntity, CosmosOptions,
-    CreateDocumentOptions, DatabaseClient, DeleteDocumentOptions, GetDocumentOptions,
-    GetDocumentResponse, Query, ReplaceDocumentOptions,
+    AuthorizationToken, CollectionClient, ConsistencyLevel, CosmosClient, CosmosEntity,
+    CosmosOptions, CreateDocumentOptions, DatabaseClient, DeleteDocumentOptions,
+    GetDocumentOptions, GetDocumentResponse, Query, ReplaceDocumentOptions,
 };
-use azure_cosmos::responses::{
-    QueryDocumentsResponse, QueryDocumentsResponseDocuments, QueryResult,
-};
+use azure_cosmos::responses::QueryDocumentsResponseDocuments;
 use hyper::header::HeaderValue;
 use hyper::http::response::Builder;
 use hyper::service::{make_service_fn, service_fn};
@@ -15,6 +13,7 @@ use hyper_tls::HttpsConnector;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -68,8 +67,12 @@ impl<'a> CosmosEntity<'a> for Playlist {
     }
 }
 
-async fn handle(db: CosmosClient, req: Request<Body>) -> Result<Response<Body>, Infallible> {
-    Ok(match route(db, req).await {
+async fn handle(
+    db: CosmosClient,
+    req: Request<Body>,
+    session: Arc<RwLock<Option<ConsistencyLevel>>>,
+) -> Result<Response<Body>, Infallible> {
+    Ok(match route(db, req, session).await {
         Err(e) => {
             eprintln!("server error: {:?}", e);
             Response::builder()
@@ -81,7 +84,11 @@ async fn handle(db: CosmosClient, req: Request<Body>) -> Result<Response<Body>, 
     })
 }
 
-async fn route(db: CosmosClient, req: Request<Body>) -> Result<Response<Body>, Error> {
+async fn route(
+    db: CosmosClient,
+    req: Request<Body>,
+    session: Arc<RwLock<Option<ConsistencyLevel>>>,
+) -> Result<Response<Body>, Error> {
     let db = db.into_database_client("songsort");
     let user_id = req.headers()["x-real-ip"]
         .to_str()
@@ -126,14 +133,18 @@ async fn route(db: CosmosClient, req: Request<Body>) -> Result<Response<Body>, E
                 .status(StatusCode::OK)
                 .body(Body::empty())
                 .map_err(Error::from),
-            (["playlists"], &Method::GET) => get_playlists(db, user_id).await,
+            (["playlists"], &Method::GET) => get_playlists(db, user_id, session).await,
             (["playlists", playlist_id], &Method::POST) => {
-                import_playlist(db, user_id, playlist_id).await
+                import_playlist(db, user_id, playlist_id, session).await
             }
-            (["playlists", id], &Method::DELETE) => delete_playlist(db, user_id, id).await,
-            (["playlists", id, "scores"], &Method::GET) => get_scores_by_id(db, user_id, id).await,
-            (["elo"], &Method::POST) => elo(db, user_id, req.uri().query()).await,
-            ([playlist_id], &Method::POST) => import_playlist(db, user_id, playlist_id).await, // TODO: deprecate
+            (["playlists", id], &Method::DELETE) => delete_playlist(db, user_id, id, session).await,
+            (["playlists", id, "scores"], &Method::GET) => {
+                get_scores_by_id(db, user_id, id, session).await
+            }
+            (["elo"], &Method::POST) => elo(db, user_id, req.uri().query(), session).await,
+            ([playlist_id], &Method::POST) => {
+                import_playlist(db, user_id, playlist_id, session).await
+            } // TODO: deprecate
             // TODO: deprecate
             ([path], &Method::GET) => get_scores(db, user_id, path).await,
             (_, _) => get_response_builder()
@@ -153,14 +164,32 @@ async fn route(db: CosmosClient, req: Request<Body>) -> Result<Response<Body>, E
     }
 }
 
-async fn get_playlists(db: DatabaseClient, user_id: String) -> Result<Response<Body>, Error> {
+async fn get_playlists(
+    db: DatabaseClient,
+    user_id: String,
+    session: Arc<RwLock<Option<ConsistencyLevel>>>,
+) -> Result<Response<Body>, Error> {
     let db = db.into_collection_client("playlists");
     let query = format!("SELECT * FROM c WHERE c.user_id = \"{}\"", user_id);
     let query = Query::new(&query);
-    let resp =
-        QueryDocumentsResponseDocuments::try_from(db.query_documents().execute(&query).await?)?;
+    let session_copy = session.read().unwrap().clone();
+    let resp = if let Some(session) = session_copy {
+        db.query_documents()
+            .consistency_level(session)
+            .execute(&query)
+            .await?
+    } else {
+        let resp = db.query_documents().execute(&query).await?;
+        *session.write().unwrap() = Some(ConsistencyLevel::Session(resp.session_token.clone()));
+        resp
+    };
     let playlists = Playlists {
-        items: resp.results.into_iter().map(|r| r.result).collect(),
+        items: resp
+            .into_documents()?
+            .results
+            .into_iter()
+            .map(|r| r.result)
+            .collect(),
     };
     get_response_builder()
         .body(Body::from(serde_json::to_string(&playlists)?))
@@ -171,11 +200,25 @@ async fn delete_playlist(
     db: DatabaseClient,
     user_id: String,
     id: &str,
+    session: Arc<RwLock<Option<ConsistencyLevel>>>,
 ) -> Result<Response<Body>, Error> {
-    db.into_collection_client("playlists")
-        .into_document_client(id, &user_id)?
-        .delete_document(Context::new(), DeleteDocumentOptions::new())
-        .await?;
+    let session_copy = session.read().unwrap().clone();
+    if let Some(session) = session_copy {
+        db.into_collection_client("playlists")
+            .into_document_client(id, &user_id)?
+            .delete_document(
+                Context::new(),
+                DeleteDocumentOptions::new().consistency_level(session),
+            )
+            .await?;
+    } else {
+        let resp = db
+            .into_collection_client("playlists")
+            .into_document_client(id, &user_id)?
+            .delete_document(Context::new(), DeleteDocumentOptions::new())
+            .await?;
+        *session.write().unwrap() = Some(ConsistencyLevel::Session(resp.session_token.clone()));
+    }
     get_response_builder()
         .status(StatusCode::NO_CONTENT)
         .body(Body::empty())
@@ -186,10 +229,12 @@ async fn elo(
     db: DatabaseClient,
     user_id: String,
     query: Option<&str>,
+    session: Arc<RwLock<Option<ConsistencyLevel>>>,
 ) -> Result<Response<Body>, Error> {
     if let Some((win, lose)) = query.and_then(|s| s.split_once('&')) {
         let client = db.clone().into_collection_client("scores");
-        let scores = get_score_docs(client.clone(), user_id.clone(), &[win, lose]).await?;
+        let scores =
+            get_score_docs(client.clone(), user_id.clone(), &[win, lose], &session).await?;
         let mut iter = scores.into_iter();
         if let (Some(win_score), Some(lose_score)) = (iter.next(), iter.next()) {
             let (mut win_score, mut lose_score) = if win_score.track_id == win {
@@ -212,12 +257,21 @@ async fn elo(
                 .into_document_client(win_score.id.clone(), &win_score.user_id)?;
             let client2 =
                 client.into_document_client(lose_score.id.clone(), &lose_score.user_id)?;
+            let session = session
+                .read()
+                .unwrap()
+                .clone()
+                .expect("session should be set by get_score_docs");
             futures::future::try_join(
-                client1.replace_document(Context::new(), &win_score, ReplaceDocumentOptions::new()),
+                client1.replace_document(
+                    Context::new(),
+                    &win_score,
+                    ReplaceDocumentOptions::new().consistency_level(session.clone()),
+                ),
                 client2.replace_document(
                     Context::new(),
                     &lose_score,
-                    ReplaceDocumentOptions::new(),
+                    ReplaceDocumentOptions::new().consistency_level(session),
                 ),
             )
             .await?;
@@ -243,6 +297,7 @@ async fn get_score_docs(
     db: CollectionClient,
     user_id: String,
     track_ids: &[&str],
+    session: &Arc<RwLock<Option<ConsistencyLevel>>>,
 ) -> Result<Vec<Score>, Error> {
     let query = format!(
         "SELECT * FROM c WHERE c.user_id = \"{}\" AND c.track_id IN ({})",
@@ -254,17 +309,22 @@ async fn get_score_docs(
             .join(",")
     );
     let query = Query::new(&query);
-    let resp: QueryDocumentsResponse<Score> = db.query_documents().execute(&query).await?;
+    let session_copy = session.read().unwrap().clone();
+    let resp = if let Some(session) = session_copy {
+        db.query_documents()
+            .consistency_level(session)
+            .execute(&query)
+            .await?
+    } else {
+        let resp = db.query_documents().execute(&query).await?;
+        *session.write().unwrap() = Some(ConsistencyLevel::Session(resp.session_token.clone()));
+        resp
+    };
     Ok(resp
+        .into_documents()?
         .results
         .into_iter()
-        .map(|r| {
-            if let QueryResult::Document(d) = r {
-                d.result
-            } else {
-                todo!()
-            }
-        })
+        .map(|r| r.result)
         .collect())
 }
 
@@ -272,6 +332,7 @@ async fn get_scores_by_id(
     db: DatabaseClient,
     user_id: String,
     id: &str,
+    session: Arc<RwLock<Option<ConsistencyLevel>>>,
 ) -> Result<Response<Body>, Error> {
     let client = db
         .clone()
@@ -298,10 +359,24 @@ async fn get_scores_by_id(
             .join(",")
     );
     let query = Query::new(&query);
-    let resp =
-        QueryDocumentsResponseDocuments::try_from(db.query_documents().execute(&query).await?)?;
+    let session_copy = session.read().unwrap().clone();
+    let resp = if let Some(session) = session_copy {
+        db.query_documents()
+            .consistency_level(session)
+            .execute(&query)
+            .await?
+    } else {
+        let resp = db.query_documents().execute(&query).await?;
+        *session.write().unwrap() = Some(ConsistencyLevel::Session(resp.session_token.clone()));
+        resp
+    };
     let scores = Scores {
-        scores: resp.results.into_iter().map(|r| r.result).collect(),
+        scores: resp
+            .into_documents()?
+            .results
+            .into_iter()
+            .map(|r| r.result)
+            .collect(),
     };
     get_response_builder()
         .body(Body::from(serde_json::to_string(&scores)?))
@@ -351,6 +426,7 @@ async fn import_playlist(
     db: DatabaseClient,
     user_id: String,
     playlist_id: &str,
+    session: Arc<RwLock<Option<ConsistencyLevel>>>,
 ) -> Result<Response<Body>, Error> {
     let https = HttpsConnector::new();
     let client = Client::builder().build::<_, hyper::Body>(https);
@@ -421,9 +497,24 @@ async fn import_playlist(
     };
 
     let playlist_client = db.clone().into_collection_client("playlists");
-    playlist_client
-        .create_document(Context::new(), &playlist, CreateDocumentOptions::new())
-        .await?;
+    let session_copy = session.read().unwrap().clone();
+    let session = if let Some(session) = session_copy {
+        playlist_client
+            .create_document(
+                Context::new(),
+                &playlist,
+                CreateDocumentOptions::new().consistency_level(session.clone()),
+            )
+            .await?;
+        session
+    } else {
+        let resp = playlist_client
+            .create_document(Context::new(), &playlist, CreateDocumentOptions::new())
+            .await?;
+        let session_copy = ConsistencyLevel::Session(resp.session_token.clone());
+        *session.write().unwrap() = Some(session_copy.clone());
+        session_copy
+    };
     let score_client = db.into_collection_client("scores");
     for i in &playlist_items.items {
         let score = Score {
@@ -436,7 +527,11 @@ async fn import_playlist(
             losses: 0,
         };
         score_client
-            .create_document(Context::new(), &score, CreateDocumentOptions::new())
+            .create_document(
+                Context::new(),
+                &score,
+                CreateDocumentOptions::new().consistency_level(session.clone()),
+            )
             .await
             .map(|_| ())
             .or_else(|e| {
@@ -475,11 +570,15 @@ async fn main() {
         authorization_token,
         CosmosOptions::default(),
     );
+    let session = Arc::new(RwLock::new(None));
     let make_svc = make_service_fn(move |_conn| {
         let client_ref = client.clone();
+        let session = Arc::clone(&session);
         async {
             // service_fn converts our function into a `Service`
-            Ok::<_, Infallible>(service_fn(move |r| handle(client_ref.clone(), r)))
+            Ok::<_, Infallible>(service_fn(move |r| {
+                handle(client_ref.clone(), r, Arc::clone(&session))
+            }))
         }
     });
 
