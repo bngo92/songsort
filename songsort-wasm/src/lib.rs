@@ -49,6 +49,7 @@ struct State {
     playlist: Option<String>,
     auth: String,
     home: Option<Element>,
+    queued_scores: Vec<Score>,
 }
 
 // Called by our JS entry point to run the example
@@ -60,6 +61,7 @@ pub async fn run() -> Result<(), JsValue> {
         playlist: None,
         auth: String::new(),
         home: None,
+        queued_scores: Vec::new(),
     }));
     let state_ref = Rc::clone(&state);
     let username = document
@@ -582,14 +584,28 @@ fn refresh_scores(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), J
         row.append_child(&score_element)?;
         scores2.append_child(&row)?;
     }
-    let scores: Vec<_> = scores
-        .scores
-        .choose_multiple(&mut rand::thread_rng(), 2)
-        .collect();
-    let track1 = scores[0].track_id.clone();
-    let track2 = scores[1].track_id.clone();
+    let queued_scores = &mut state.borrow_mut().queued_scores;
+    match queued_scores.len() {
+        // Reload the queue if it's empty
+        0 => {
+            let mut scores = scores.scores;
+            scores.shuffle(&mut rand::thread_rng());
+            queued_scores.extend(scores);
+        }
+        // Always queue the last song next before reloading
+        1 => {
+            let last = queued_scores.pop().unwrap();
+            let mut scores = scores.scores;
+            scores.shuffle(&mut rand::thread_rng());
+            queued_scores.extend(scores);
+            queued_scores.push(last);
+        }
+        _ => {}
+    };
+    let track1 = queued_scores.pop().unwrap();
+    let track2 = queued_scores.pop().unwrap();
     let state_ref = Rc::clone(&state);
-    let url = format!("https://branlandapp.com/api/elo?{}&{}", track1, track2);
+    let url = format!("https://branlandapp.com/api/elo?{}&{}", track1.track_id, track2.track_id);
     let a = Closure::wrap(Box::new(move || {
         let state = Rc::clone(&state_ref);
         let url = url.clone();
@@ -602,7 +618,7 @@ fn refresh_scores(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), J
         .set_onclick(Some(a.as_ref().unchecked_ref()));
     a.forget();
     let state_ref = Rc::clone(&state);
-    let url = format!("https://branlandapp.com/api/elo?{}&{}", track2, track1);
+    let url = format!("https://branlandapp.com/api/elo?{}&{}", track2.track_id, track1.track_id);
     let a = Closure::wrap(Box::new(move || {
         let state = Rc::clone(&state_ref);
         let url = url.clone();
@@ -620,7 +636,7 @@ fn refresh_scores(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), J
         .dyn_into::<HtmlIFrameElement>()?
         .set_src(&format!(
             "https://open.spotify.com/embed/track/{}?utm_source=generator",
-            scores[0].track_id
+            track1.track_id
         ));
     document
         .get_element_by_id("iframe2")
@@ -628,16 +644,16 @@ fn refresh_scores(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), J
         .dyn_into::<HtmlIFrameElement>()?
         .set_src(&format!(
             "https://open.spotify.com/embed/track/{}?utm_source=generator",
-            scores[1].track_id
+            track2.track_id
         ));
     document
         .get_element_by_id("track1")
         .ok_or_else(|| JsValue::from("track1 element missing"))?
-        .set_text_content(Some(&scores[0].track));
+        .set_text_content(Some(&track1.track));
     document
         .get_element_by_id("track2")
         .ok_or_else(|| JsValue::from("track2 element missing"))?
-        .set_text_content(Some(&scores[1].track));
+        .set_text_content(Some(&track2.track));
     Ok(())
 }
 
