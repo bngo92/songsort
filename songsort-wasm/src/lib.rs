@@ -3,6 +3,7 @@ use rand::prelude::SliceRandom;
 use regex::Regex;
 use serde::Deserialize;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -99,7 +100,7 @@ pub async fn run() -> Result<(), JsValue> {
                     .dyn_into::<HtmlButtonElement>()
                     .unwrap()
                     .set_onclick(None);
-                generate_playlists_page(state).await;
+                generate_home_page(state).await;
             }
         })
     }) as Box<dyn FnMut()>);
@@ -112,9 +113,45 @@ pub async fn run() -> Result<(), JsValue> {
     Ok(())
 }
 
-async fn generate_playlists_page(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
+async fn generate_home_page(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
     let window = web_sys::window().expect("no global `window` exists");
     let document = window.document().expect("should have a document on window");
+    let request = query(
+        "https://branlandapp.com/api/scores",
+        "GET",
+        &state.borrow().auth,
+    )
+    .unwrap();
+    let resp_value = JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .unwrap();
+    let resp: Response = resp_value.dyn_into().unwrap();
+    let json = JsFuture::from(resp.json()?).await?;
+    let scores: Scores = json.into_serde().unwrap();
+    let mut artists = HashMap::new();
+    for s in &scores.scores {
+        artists
+            .entry(s.artists.join(", "))
+            .or_insert_with(Vec::new)
+            .push(s.score);
+    }
+    let mut artists: Vec<_> = artists
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.iter().sum::<i32>() / v.len() as i32))
+        .collect();
+    artists.sort_by_key(|(_, v)| -*v);
+    let mut albums = HashMap::new();
+    for s in &scores.scores {
+        albums
+            .entry(s.album.clone())
+            .or_insert_with(Vec::new)
+            .push(s.score);
+    }
+    let mut albums: Vec<_> = albums
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.iter().sum::<i32>() / v.len() as i32))
+        .collect();
+    albums.sort_by_key(|(_, v)| -*v);
     let main = document
         .get_element_by_id("main")
         .ok_or_else(|| JsValue::from("main element missing"))?;
@@ -147,7 +184,76 @@ async fn generate_playlists_page(state: Rc<RefCell<State>>) -> Result<(), JsValu
     import.set_class_name("col-1 offset-2 btn btn-success");
     import.set_text_content(Some("Import"));
     row.append_child(&import)?;
+    let header = document.create_element("h1")?;
+    header.set_text_content(Some("Stats"));
+    home.append_child(&header)?;
     form.append_child(&row)?;
+    let row = document.create_element("div")?;
+    row.set_class_name("row");
+    let left = document.create_element("div")?;
+    left.set_class_name("col-6");
+    let header = document.create_element("h2")?;
+    header.set_text_content(Some("Artists"));
+    left.append_child(&header)?;
+    let table = document.create_element("table")?;
+    table.set_class_name("table table-striped");
+    let head = document.create_element("thead")?;
+    let tr = document.create_element("tr")?;
+    tr.append_child(create_th(&document, "col-1", "#")?.as_ref())?;
+    tr.append_child(create_th(&document, "col-8", "Artist")?.as_ref())?;
+    tr.append_child(create_th(&document, "", "Score")?.as_ref())?;
+    head.append_child(&tr)?;
+    table.append_child(&head)?;
+    let body = document.create_element("tbody")?;
+    for (i, (artist, score)) in artists.iter().enumerate() {
+        let row = document.create_element("tr")?;
+        let num = document.create_element("th")?;
+        num.set_text_content(Some(&(i + 1).to_string()));
+        row.append_child(&num)?;
+        let track = document.create_element("td")?;
+        track.set_text_content(Some(artist));
+        row.append_child(&track)?;
+        let score_element = document.create_element("td")?;
+        score_element.set_text_content(Some(&score.to_string()));
+        row.append_child(&score_element)?;
+        body.append_child(&row)?;
+    }
+    table.append_child(&body)?;
+    left.append_child(&table)?;
+    row.append_child(&left)?;
+    home.append_child(&row)?;
+    let right = document.create_element("div")?;
+    right.set_class_name("col-6");
+    let header = document.create_element("h2")?;
+    header.set_text_content(Some("Albums"));
+    right.append_child(&header)?;
+    let table = document.create_element("table")?;
+    table.set_class_name("table table-striped");
+    let head = document.create_element("thead")?;
+    let tr = document.create_element("tr")?;
+    tr.append_child(create_th(&document, "col-1", "#")?.as_ref())?;
+    tr.append_child(create_th(&document, "col-8", "Album")?.as_ref())?;
+    tr.append_child(create_th(&document, "", "Score")?.as_ref())?;
+    head.append_child(&tr)?;
+    table.append_child(&head)?;
+    let body = document.create_element("tbody")?;
+    for (i, (album, score)) in albums.iter().enumerate() {
+        let row = document.create_element("tr")?;
+        let num = document.create_element("th")?;
+        num.set_text_content(Some(&(i + 1).to_string()));
+        row.append_child(&num)?;
+        let track = document.create_element("td")?;
+        track.set_text_content(Some(album));
+        row.append_child(&track)?;
+        let score_element = document.create_element("td")?;
+        score_element.set_text_content(Some(&score.to_string()));
+        row.append_child(&score_element)?;
+        body.append_child(&row)?;
+    }
+    table.append_child(&body)?;
+    right.append_child(&table)?;
+    row.append_child(&right)?;
+    home.append_child(&row)?;
     let a = Closure::wrap(Box::new(move || {
         let state = Rc::clone(&state);
         wasm_bindgen_futures::spawn_local(async move {
@@ -163,7 +269,7 @@ async fn generate_playlists_page(state: Rc<RefCell<State>>) -> Result<(), JsValu
             if let Some(id) = re.captures_iter(&input).next() {
                 input = id[1].to_owned()
             }
-            let url = format!("https://branlandapp.com/api/{}", input);
+            let url = format!("https://branlandapp.com/api/playlists/{}", input);
             let request = query(&url, "POST", &state.borrow().auth).unwrap();
             let resp_value = JsFuture::from(window.fetch_with_request(&request))
                 .await
