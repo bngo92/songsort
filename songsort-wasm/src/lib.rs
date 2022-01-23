@@ -152,26 +152,26 @@ async fn switch_pages(state: Rc<RefCell<State>>, next_page: Page) -> Result<(), 
     let navbar = document
         .get_element_by_id("navbar")
         .ok_or_else(|| JsValue::from("navbar element missing"))?;
-    {
-        let mut borrowed_state = state.borrow_mut();
-        match borrowed_state.current_page {
-            Page::Home => {
-                if let Some(child) = main.first_element_child() {
-                    child.remove();
-                    borrowed_state.home = Some(child);
-                }
+    let mut borrowed_state = state.borrow_mut();
+    // TODO: Clean up closures and one-off elements
+    match borrowed_state.current_page {
+        Page::Home => {
+            if let Some(child) = main.first_element_child() {
+                child.remove();
+                borrowed_state.home = Some(child);
             }
-            Page::RandomMatch(_) => {
-                if let Some(child) = main.first_element_child() {
-                    child.remove();
-                    borrowed_state.random_match = Some(child);
-                }
-                navbar.children().item(1).unwrap().remove();
-                borrowed_state.queued_scores.clear();
-            }
-            Page::Login => {}
         }
+        Page::RandomMatch(_) => {
+            if let Some(child) = main.first_element_child() {
+                child.remove();
+                borrowed_state.random_match = Some(child);
+            }
+            navbar.children().item(1).unwrap().remove();
+            borrowed_state.queued_scores.clear();
+        }
+        Page::Login => {}
     }
+    drop(borrowed_state);
     match next_page {
         Page::Home => {
             let mut borrowed_state = state.borrow_mut();
@@ -195,6 +195,7 @@ async fn switch_pages(state: Rc<RefCell<State>>, next_page: Page) -> Result<(), 
                 generate_random_page()?
             };
             main.append_child(&element)?;
+            // TODO: Cache navbar element
             let ul = document.create_element("ul")?;
             ul.set_class_name("navbar-nav flex-grow-1");
             let li = document.create_element("li")?;
