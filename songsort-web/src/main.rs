@@ -1,3 +1,4 @@
+#![feature(let_else)]
 use azure_core::Context;
 use azure_cosmos::prelude::{
     AuthorizationToken, CollectionClient, ConsistencyLevel, CosmosClient, CosmosEntity,
@@ -18,6 +19,7 @@ use uuid::Uuid;
 #[derive(Debug, Deserialize, Serialize)]
 struct Token {
     access_token: String,
+    refresh_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -68,6 +70,23 @@ impl<'a> CosmosEntity<'a> for Playlist {
     }
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct User {
+    id: String,
+    user_id: String,
+    auth: String,
+    access_token: String,
+    refresh_token: String,
+}
+
+impl<'a> CosmosEntity<'a> for User {
+    type Entity = &'a str;
+
+    fn partition_key(&'a self) -> Self::Entity {
+        self.user_id.as_ref()
+    }
+}
+
 async fn handle(
     db: CosmosClient,
     req: Request<Body>,
@@ -91,10 +110,6 @@ async fn route(
     session: Arc<RwLock<Option<ConsistencyLevel>>>,
 ) -> Result<Response<Body>, Error> {
     let db = db.into_database_client("songsort");
-    let user_id = req.headers()["x-real-ip"]
-        .to_str()
-        .expect("x-real-ip to be ASCII")
-        .to_owned();
     eprintln!("{}", req.uri().path());
     if let Some(path) = req.uri().path().strip_prefix("/api/") {
         let path: Vec<_> = path.split('/').collect();
@@ -112,19 +127,39 @@ async fn route(
                 .body(Body::empty())
                 .map_err(Error::from);
         }
-        if req.headers().get("Authorization")
-            != HeaderValue::from_str(&format!(
-                "Basic {}",
-                std::env::var("AUTH").expect("AUTH is missing")
-            ))
-            .ok()
-            .as_ref()
+        let Some(auth) = req.headers().get("Authorization") else {
+            return get_response_builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .body(Body::empty())
+                .map_err(Error::from)};
+        let Some((_, auth)) = auth.to_str().expect("auth to be ASCII").split_once(' ') else {
+            return get_response_builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::empty())
+                .map_err(Error::from);
+        };
+        let user_id = if auth == std::env::var("AUTH").expect("AUTH is missing") {
+            req.headers()["x-real-ip"]
+                .to_str()
+                .expect("x-real-ip to be ASCII")
+                .to_owned()
+        } else if let Ok(user_id) = login(
+            db.clone(),
+            &session,
+            auth,
+            req.headers()["Origin"]
+                .to_str()
+                .expect("Origin to be ASCII"),
+        )
+        .await
         {
+            user_id
+        } else {
             return get_response_builder()
                 .status(StatusCode::UNAUTHORIZED)
                 .body(Body::empty())
                 .map_err(Error::from);
-        }
+        };
         match (&path[..], req.method()) {
             (["login"], &Method::POST) => get_response_builder()
                 .header(
@@ -159,6 +194,103 @@ async fn route(
             .body(Body::empty())
             .map_err(Error::from)
     }
+}
+
+async fn login(
+    db: DatabaseClient,
+    session: &Arc<RwLock<Option<ConsistencyLevel>>>,
+    auth: &str,
+    origin: &str,
+) -> Result<String, Error> {
+    let db = db.into_collection_client("users");
+    let query = format!("SELECT * FROM c WHERE c.auth = \"{}\"", auth);
+    let query = Query::new(&query);
+    let session_copy = session.read().unwrap().clone();
+    let (resp, session) = if let Some(session) = session_copy {
+        (
+            db.query_documents()
+                .query_cross_partition(true)
+                .parallelize_cross_partition_query(true)
+                .consistency_level(session.clone())
+                .execute(&query)
+                .await?,
+            session,
+        )
+    } else {
+        let resp = db
+            .query_documents()
+            .query_cross_partition(true)
+            .parallelize_cross_partition_query(true)
+            .execute(&query)
+            .await?;
+        let token = ConsistencyLevel::Session(resp.session_token.clone());
+        *session.write().unwrap() = Some(token.clone());
+        (resp, token)
+    };
+    if let Some(user) = resp
+        .into_documents()?
+        .results
+        .into_iter()
+        .map(|r| -> User { r.result })
+        .next()
+    {
+        return Ok(user.id);
+    }
+    let https = HttpsConnector::new();
+    let client = Client::builder().build::<_, hyper::Body>(https);
+    let uri: Uri = "https://accounts.spotify.com/api/token".parse().unwrap();
+    let resp = client
+        .request(
+            Request::builder()
+                .method(Method::POST)
+                .uri(uri)
+                .header(
+                    "Authorization",
+                    &format!(
+                        "Basic {}",
+                        std::env::var("SPOTIFY_TOKEN").expect("SPOTIFY_TOKEN is missing")
+                    ),
+                )
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "grant_type=authorization_code&code={}&redirect_uri={}",
+                    auth, origin
+                )))?,
+        )
+        .await?;
+    let got = hyper::body::to_bytes(resp.into_body()).await?;
+    let token: Token = serde_json::from_slice(&got)?;
+
+    let https = HttpsConnector::new();
+    let client = Client::builder().build::<_, hyper::Body>(https);
+    let uri: Uri = "https://api.spotify.com/v1/me".parse().unwrap();
+    let resp = client
+        .request(
+            Request::builder()
+                .uri(uri)
+                .header("Authorization", format!("Bearer {}", token.access_token))
+                .body(Body::empty())?,
+        )
+        .await?;
+    let got = hyper::body::to_bytes(resp.into_body()).await?;
+    let user: songsort_web::User = serde_json::from_slice(&got)?;
+
+    let user = User {
+        id: Uuid::new_v4().to_hyphenated().to_string(),
+        user_id: user.id,
+        auth: auth.to_owned(),
+        access_token: token.access_token.clone(),
+        refresh_token: token
+            .refresh_token
+            .expect("Spotify should return refresh token"),
+    };
+    db.create_document(
+        Context::new(),
+        &user,
+        CreateDocumentOptions::new().consistency_level(session),
+    )
+    .await?;
+    Ok(user.id)
 }
 
 async fn get_playlists(

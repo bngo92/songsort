@@ -33,3 +33,8 @@ pub struct Album {
 pub struct Artist {
     pub name: String,
 }
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct User {
+    pub id: String,
+}
