@@ -143,14 +143,18 @@ async fn route(
                 .to_str()
                 .expect("x-real-ip to be ASCII")
                 .to_owned()
-        } else if let Ok(user_id) = login(
-            db.clone(),
-            &session,
-            auth,
-            req.headers()["Origin"]
+        } else if let Ok(user_id) = login(db.clone(), &session, auth, {
+            let uri: Uri = req.headers()["Referer"]
                 .to_str()
-                .expect("Origin to be ASCII"),
-        )
+                .expect("Referer to be ASCII")
+                .parse()
+                .expect("referer URI");
+            &format!(
+                "{}://{}",
+                uri.scheme().expect("scheme"),
+                uri.authority().expect("authority")
+            )
+        })
         .await
         {
             user_id
