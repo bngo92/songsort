@@ -23,23 +23,17 @@ td {
   </head>
   <body>
     <nav class="navbar navbar-dark bg-dark">
-      <div id="navbar" class="container">
+      <div id="navbar" class="container-lg">
         <a id="brand" class="navbar-brand" href="#">Songsort</a>
-        <form class="d-flex">
-          <input class="form-control me-2" type="text" id="username" placeholder="username">
-          <input class="form-control me-2" type="text" id="password" placeholder="password">
-          <button type="button" id="login" class="btn btn-success">Login</button>
-        </form>
       </div>
     </nav>
-    <div id="main" class="container my-md-4">
+    <div id="main" class="container-lg my-md-4">
     </div>
     <noscript>This page contains webassembly and javascript content, please enable javascript in your browser.</noscript>
     <script type="module">
-      import init, { run } from './songsort_wasm.js'
+      import init from './songsort_wasm.js'
       async function initRun() {
       await init();
-      run();
       }
       initRun();
     </script>

@@ -10,7 +10,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     Document, Element, HtmlAnchorElement, HtmlButtonElement, HtmlIFrameElement, HtmlInputElement,
-    Request, RequestInit, RequestMode, Response, Window,
+    Request, RequestInit, RequestMode, Response, UrlSearchParams, Window,
 };
 
 #[derive(Deserialize)]
@@ -75,55 +75,6 @@ pub async fn run() -> Result<(), JsValue> {
         queued_scores: Vec::new(),
     }));
     let state_ref = Rc::clone(&state);
-    let username = document
-        .get_element_by_id("username")
-        .ok_or_else(|| JsValue::from("username element missing"))?
-        .dyn_into::<HtmlInputElement>()?;
-    let password = document
-        .get_element_by_id("password")
-        .ok_or_else(|| JsValue::from("password element missing"))?
-        .dyn_into::<HtmlInputElement>()?;
-    let a = Closure::wrap(Box::new(move || {
-        let state = Rc::clone(&state_ref);
-        state.borrow_mut().auth =
-            base64::encode(format!("{}:{}", username.value(), password.value()));
-        wasm_bindgen_futures::spawn_local(async {
-            let window = web_sys::window().expect("no global `window` exists");
-            let document = window.document().expect("should have a document on window");
-            let request = query(
-                "https://branlandapp.com/api/login",
-                "POST",
-                &state.borrow().auth,
-            )
-            .unwrap();
-            let resp_value = JsFuture::from(window.fetch_with_request(&request))
-                .await
-                .unwrap();
-            let resp: Response = resp_value.dyn_into().unwrap();
-            if resp.status() == 401 {
-                window
-                    .alert_with_message("Invalid username or password")
-                    .expect("alert");
-            } else {
-                // TODO: clean up login elements
-                document
-                    .get_element_by_id("login")
-                    .ok_or_else(|| JsValue::from("login element missing"))
-                    .unwrap()
-                    .dyn_into::<HtmlButtonElement>()
-                    .unwrap()
-                    .set_onclick(None);
-                switch_pages(state, Page::Home).await.unwrap();
-            }
-        })
-    }) as Box<dyn FnMut()>);
-    document
-        .get_element_by_id("login")
-        .ok_or_else(|| JsValue::from("login element missing"))?
-        .dyn_into::<HtmlButtonElement>()?
-        .set_onclick(Some(a.as_ref().unchecked_ref()));
-    a.forget();
-    let state_ref = Rc::clone(&state);
     let a = Closure::wrap(Box::new(move || {
         let state = Rc::clone(&state_ref);
         wasm_bindgen_futures::spawn_local(async {
@@ -137,6 +88,25 @@ pub async fn run() -> Result<(), JsValue> {
         .dyn_into::<HtmlAnchorElement>()?
         .set_onclick(Some(a.as_ref().unchecked_ref()));
     a.forget();
+    let q = window.location().search()?;
+    let params = UrlSearchParams::new_with_str(&q)?;
+    if let Some(code) = params.get("code") {
+        state.borrow_mut().auth = code.clone();
+        let request = query(
+            "https://branlandapp.com/api/login",
+            "POST",
+            &state.borrow().auth,
+        )?;
+        let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
+        let resp: Response = resp_value.dyn_into()?;
+        if resp.status() == 401 {
+            window.alert_with_message("Please refresh")?;
+        } else {
+            switch_pages(state, Page::Home).await?;
+        }
+    } else {
+        window.alert_with_message("unimplemented")?;
+    };
     Ok(())
 }
 
@@ -378,6 +348,9 @@ async fn refresh_home_page(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
     let body = document
         .get_element_by_id("left-stats")
         .ok_or_else(|| JsValue::from("left-stats element missing"))?;
+    while let Some(child) = body.first_element_child() {
+        child.remove();
+    }
     for (i, (artist, score)) in artists.iter().enumerate() {
         let row = document.create_element("tr")?;
         let num = document.create_element("th")?;
@@ -394,6 +367,9 @@ async fn refresh_home_page(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
     let body = document
         .get_element_by_id("right-stats")
         .ok_or_else(|| JsValue::from("right-stats element missing"))?;
+    while let Some(child) = body.first_element_child() {
+        child.remove();
+    }
     for (i, (album, score)) in albums.iter().enumerate() {
         let row = document.create_element("tr")?;
         let num = document.create_element("th")?;
