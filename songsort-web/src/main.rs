@@ -138,12 +138,15 @@ async fn route(
                 .body(Body::empty())
                 .map_err(Error::from);
         };
-        let user_id = if auth == std::env::var("AUTH").expect("AUTH is missing") {
-            req.headers()["x-real-ip"]
-                .to_str()
-                .expect("x-real-ip to be ASCII")
-                .to_owned()
-        } else if let Ok(user_id) = login(db.clone(), &session, auth, {
+        let (user_id, access_token) = if auth == std::env::var("AUTH").expect("AUTH is missing") {
+            (
+                req.headers()["x-real-ip"]
+                    .to_str()
+                    .expect("x-real-ip to be ASCII")
+                    .to_owned(),
+                None,
+            )
+        } else if let Ok((user_id, access_token)) = login(db.clone(), &session, auth, {
             let uri: Uri = req.headers()["Referer"]
                 .to_str()
                 .expect("Referer to be ASCII")
@@ -157,7 +160,7 @@ async fn route(
         })
         .await
         {
-            user_id
+            (user_id, Some(access_token))
         } else {
             return get_response_builder()
                 .status(StatusCode::UNAUTHORIZED)
@@ -183,6 +186,9 @@ async fn route(
             }
             (["elo"], &Method::POST) => elo(db, session, user_id, req.uri().query()).await,
             (["scores"], &Method::GET) => get_scores(db, session, user_id).await,
+            (["spotify", "playlists"], &Method::GET) => {
+                get_spotify_playlists(access_token.as_ref().unwrap()).await
+            }
             (_, _) => get_response_builder()
                 .status(StatusCode::METHOD_NOT_ALLOWED)
                 .body(Body::empty())
@@ -205,7 +211,7 @@ async fn login(
     session: &Arc<RwLock<Option<ConsistencyLevel>>>,
     auth: &str,
     origin: &str,
-) -> Result<String, Error> {
+) -> Result<(String, String), Error> {
     let db = db.into_collection_client("users");
     let query = format!("SELECT * FROM c WHERE c.auth = \"{}\"", auth);
     let query = Query::new(&query);
@@ -238,7 +244,7 @@ async fn login(
         .map(|r| -> User { r.result })
         .next()
     {
-        return Ok(user.user_id);
+        return Ok((user.user_id, user.access_token));
     }
     let https = HttpsConnector::new();
     let client = Client::builder().build::<_, hyper::Body>(https);
@@ -294,7 +300,7 @@ async fn login(
         CreateDocumentOptions::new().consistency_level(session),
     )
     .await?;
-    Ok(user.user_id)
+    Ok((user.user_id, user.access_token))
 }
 
 async fn get_playlists(
@@ -677,6 +683,25 @@ async fn import_playlist(
     get_response_builder()
         .status(StatusCode::CREATED)
         .body(Body::empty())
+        .map_err(Error::from)
+}
+
+async fn get_spotify_playlists(access_token: &str) -> Result<Response<Body>, Error> {
+    let https = HttpsConnector::new();
+    let client = Client::builder().build::<_, hyper::Body>(https);
+    let uri: Uri = "https://api.spotify.com/v1/me/playlists".parse().unwrap();
+    let resp = client
+        .request(
+            Request::builder()
+                .uri(uri)
+                .header("Authorization", format!("Bearer {}", access_token))
+                .body(Body::empty())?,
+        )
+        .await?;
+    let got = hyper::body::to_bytes(resp.into_body()).await?;
+    let playlists: songsort_web::Playlists = serde_json::from_slice(&got).unwrap();
+    get_response_builder()
+        .body(Body::from(serde_json::to_string(&playlists)?))
         .map_err(Error::from)
 }
 

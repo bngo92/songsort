@@ -1,6 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct Playlists {
+    pub items: Vec<Playlist>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Playlist {
     pub name: String,
 }
