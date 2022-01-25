@@ -238,7 +238,7 @@ async fn login(
         .map(|r| -> User { r.result })
         .next()
     {
-        return Ok(user.id);
+        return Ok(user.user_id);
     }
     let https = HttpsConnector::new();
     let client = Client::builder().build::<_, hyper::Body>(https);
@@ -294,7 +294,7 @@ async fn login(
         CreateDocumentOptions::new().consistency_level(session),
     )
     .await?;
-    Ok(user.id)
+    Ok(user.user_id)
 }
 
 async fn get_playlists(
