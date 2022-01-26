@@ -187,7 +187,7 @@ async fn route(
             (["elo"], &Method::POST) => elo(db, session, user_id, req.uri().query()).await,
             (["scores"], &Method::GET) => get_scores(db, session, user_id).await,
             (["spotify", "playlists"], &Method::GET) => {
-                get_spotify_playlists(access_token.as_ref().unwrap()).await
+                get_spotify_playlists(user_id, access_token.as_ref().unwrap()).await
             }
             (_, _) => get_response_builder()
                 .status(StatusCode::METHOD_NOT_ALLOWED)
@@ -686,7 +686,10 @@ async fn import_playlist(
         .map_err(Error::from)
 }
 
-async fn get_spotify_playlists(access_token: &str) -> Result<Response<Body>, Error> {
+async fn get_spotify_playlists(
+    user_id: String,
+    access_token: &str,
+) -> Result<Response<Body>, Error> {
     let https = HttpsConnector::new();
     let client = Client::builder().build::<_, hyper::Body>(https);
     let uri: Uri = "https://api.spotify.com/v1/me/playlists".parse().unwrap();
@@ -700,6 +703,21 @@ async fn get_spotify_playlists(access_token: &str) -> Result<Response<Body>, Err
         .await?;
     let got = hyper::body::to_bytes(resp.into_body()).await?;
     let playlists: songsort_web::Playlists = serde_json::from_slice(&got).unwrap();
+    let playlists = Playlists {
+        items: playlists
+            .items
+            .into_iter()
+            // Create a dummy playlist object to wrap Spotify's
+            // The client only needs the name and ID for importing
+            .map(|p| Playlist {
+                id: Uuid::new_v4().to_hyphenated().to_string(),
+                playlist_id: p.id,
+                name: p.name,
+                user_id: user_id.clone(),
+                tracks: Vec::new(),
+            })
+            .collect(),
+    };
     get_response_builder()
         .body(Body::from(serde_json::to_string(&playlists)?))
         .map_err(Error::from)

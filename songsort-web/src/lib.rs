@@ -7,6 +7,7 @@ pub struct Playlists {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Playlist {
+    pub id: String,
     pub name: String,
 }
 
