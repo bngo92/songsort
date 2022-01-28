@@ -202,15 +202,16 @@ async fn generate_home_page(state: &Rc<RefCell<State>>) -> Result<Element, JsVal
     let home = document.create_element("div")?;
     home.set_id("home");
     let header = document.create_element("h1")?;
-    header.set_text_content(Some("Playlists"));
+    header.set_text_content(Some("Saved Playlists"));
     home.append_child(&header)?;
-    let form = document.create_element("form")?;
     let playlists = document.create_element("div")?;
     playlists.set_id("playlists");
-    form.append_child(&playlists)?;
-    home.append_child(&form)?;
+    home.append_child(&playlists)?;
     let row = document.create_element("div")?;
     row.set_class_name("row");
+    let form = document.create_element("form")?;
+    let form_row = document.create_element("div")?;
+    form_row.set_class_name("row");
     let input = document
         .create_element("input")?
         .dyn_into::<HtmlInputElement>()?;
@@ -218,18 +219,26 @@ async fn generate_home_page(state: &Rc<RefCell<State>>) -> Result<Element, JsVal
     input.set_id("input");
     input.set_value("https://open.spotify.com/playlist/5jPjYAdQO0MgzHdwSmYPNZ?si=05d659645f2d4781");
     input.set_class_name("col-7");
-    row.append_child(&input)?;
+    form_row.append_child(&input)?;
     let import = document
         .create_element("button")?
         .dyn_into::<HtmlButtonElement>()?;
     import.set_type("button");
     import.set_class_name("col-1 offset-2 btn btn-success");
-    import.set_text_content(Some("Import"));
-    row.append_child(&import)?;
+    import.set_text_content(Some("Save"));
+    form_row.append_child(&import)?;
+    form.append_child(&form_row)?;
+    row.append_child(&form)?;
+    home.append_child(&row)?;
+    let header = document.create_element("h1")?;
+    header.set_text_content(Some("My Spotify Playlists"));
+    home.append_child(&header)?;
+    let spotify = document.create_element("div")?;
+    spotify.set_id("spotify");
+    home.append_child(&spotify)?;
     let header = document.create_element("h1")?;
     header.set_text_content(Some("Stats"));
     home.append_child(&header)?;
-    form.append_child(&row)?;
     let row = document.create_element("div")?;
     row.set_class_name("row");
     let left = document.create_element("div")?;
@@ -415,7 +424,7 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
             let row = document.create_element("div")?;
             row.set_class_name("row");
             let label = document.create_element("label")?;
-            label.set_class_name("col-7 col-form-label");
+            label.set_class_name("col-7");
             let link = document
                 .create_element("a")?
                 .dyn_into::<HtmlAnchorElement>()?;
@@ -466,7 +475,7 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
                 .dyn_into::<HtmlButtonElement>()?;
             button.set_type("button");
             button.set_class_name("btn btn-danger col-1");
-            button.set_text_content(Some("Delete"));
+            button.set_text_content(Some("Unsave"));
             let state_ref = Rc::clone(&state);
             let a = Closure::wrap(Box::new(move || {
                 let state = Rc::clone(&state_ref);
@@ -486,6 +495,65 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
             row.append_child(&button)?;
             playlists_element.append_child(&row)?;
         }
+    }
+    let playlists_element = document
+        .get_element_by_id("spotify")
+        .ok_or_else(|| JsValue::from("spotify element missing"))?;
+    let request = query(
+        "https://branlandapp.com/api/spotify/playlists",
+        "GET",
+        &state.borrow().auth,
+    )
+    .unwrap();
+    let resp_value = JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .unwrap();
+    let resp: Response = resp_value.dyn_into().unwrap();
+    let json = JsFuture::from(resp.json()?).await?;
+    let playlists: Playlists = json.into_serde().unwrap();
+    while let Some(child) = playlists_element.first_element_child() {
+        child.remove();
+    }
+    for p in playlists.items {
+        let row = document.create_element("div")?;
+        row.set_class_name("row");
+        let label = document.create_element("label")?;
+        label.set_class_name("col-9");
+        let link = document
+            .create_element("a")?
+            .dyn_into::<HtmlAnchorElement>()?;
+        link.set_text_content(Some(&p.name));
+        link.set_href(&format!("https://open.spotify.com/playlist/{}", p.name));
+        label.append_child(&link)?;
+        row.append_child(&label)?;
+        let button = document
+            .create_element("button")?
+            .dyn_into::<HtmlButtonElement>()?;
+        button.set_type("button");
+        button.set_class_name("btn btn-success col-1");
+        button.set_text_content(Some("Save"));
+        let state_ref = Rc::clone(&state);
+        let a = Closure::wrap(Box::new(move || {
+            let state = Rc::clone(&state_ref);
+            let id = p.playlist_id.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let window = web_sys::window().expect("no global `window` exists");
+                let url = format!("https://branlandapp.com/api/playlists/{}", id);
+                let request = query(&url, "POST", &state.borrow().auth).unwrap();
+                let resp_value = JsFuture::from(window.fetch_with_request(&request))
+                    .await
+                    .unwrap();
+                let resp: Response = resp_value.dyn_into().unwrap();
+                if resp.status() == 201 {
+                    load_playlists(state).await.unwrap();
+                }
+                // TODO: error handling
+            })
+        }) as Box<dyn FnMut()>);
+        button.set_onclick(Some(a.as_ref().unchecked_ref()));
+        a.forget();
+        row.append_child(&button)?;
+        playlists_element.append_child(&row)?;
     }
     Ok(())
 }
