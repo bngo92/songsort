@@ -1,6 +1,6 @@
 #![feature(let_else)]
 use azure_core::Context;
-use azure_cosmos::prelude::{
+use azure_data_cosmos::prelude::{
     AuthorizationToken, CollectionClient, ConsistencyLevel, CosmosClient, CosmosEntity,
     CosmosOptions, CreateDocumentOptions, DatabaseClient, DeleteDocumentOptions,
     GetDocumentOptions, GetDocumentResponse, Query, ReplaceDocumentOptions,
@@ -11,6 +11,7 @@ use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Client, Method, Request, Response, Server, StatusCode, Uri};
 use hyper_tls::HttpsConnector;
 use serde::{Deserialize, Serialize};
+use songsort::{Playlist, Playlists, Score, Scores};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
@@ -20,54 +21,6 @@ use uuid::Uuid;
 struct Token {
     access_token: String,
     refresh_token: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct Scores {
-    scores: Vec<Score>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct Score {
-    id: String,
-    track_id: String,
-    track: String,
-    album: String,
-    artists: Vec<String>,
-    user_id: String,
-    score: i32,
-    wins: i32,
-    losses: i32,
-}
-
-impl<'a> CosmosEntity<'a> for Score {
-    type Entity = &'a str;
-
-    fn partition_key(&'a self) -> Self::Entity {
-        self.user_id.as_ref()
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct Playlists {
-    items: Vec<Playlist>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct Playlist {
-    id: String,
-    playlist_id: String,
-    name: String,
-    user_id: String,
-    tracks: Vec<String>,
-}
-
-impl<'a> CosmosEntity<'a> for Playlist {
-    type Entity = &'a str;
-
-    fn partition_key(&'a self) -> Self::Entity {
-        self.user_id.as_ref()
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -668,8 +621,8 @@ async fn import_playlist(
             .await
             .map(|_| ())
             .or_else(|e| {
-                if let azure_cosmos::Error::Core(azure_core::Error::PolicyError(ref e)) = e {
-                    if let Some(azure_core::HttpError::ErrorStatusCode {
+                if let azure_data_cosmos::Error::Core(azure_core::Error::Policy(ref e)) = e {
+                    if let Some(azure_core::HttpError::StatusCode {
                         status: StatusCode::CONFLICT,
                         ..
                     }) = e.downcast_ref::<azure_core::HttpError>()
@@ -770,7 +723,7 @@ enum Error {
     HyperError(hyper::Error),
     RequestError(hyper::http::Error),
     JSONError(serde_json::Error),
-    CosmosError(azure_cosmos::Error),
+    CosmosError(azure_data_cosmos::Error),
 }
 
 impl From<hyper::Error> for Error {
@@ -791,8 +744,8 @@ impl From<serde_json::Error> for Error {
     }
 }
 
-impl From<azure_cosmos::Error> for Error {
-    fn from(e: azure_cosmos::Error) -> Error {
+impl From<azure_data_cosmos::Error> for Error {
+    fn from(e: azure_data_cosmos::Error) -> Error {
         Error::CosmosError(e)
     }
 }

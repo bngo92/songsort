@@ -1,7 +1,7 @@
 #![feature(async_closure)]
 use rand::prelude::SliceRandom;
 use regex::Regex;
-use serde::Deserialize;
+use songsort::{Playlists, Scores, Score};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -12,38 +12,6 @@ use web_sys::{
     Document, Element, HtmlAnchorElement, HtmlButtonElement, HtmlIFrameElement, HtmlInputElement,
     Request, RequestInit, RequestMode, Response, UrlSearchParams, Window,
 };
-
-#[derive(Deserialize)]
-pub struct Scores {
-    pub scores: Vec<Score>,
-}
-
-#[derive(Deserialize)]
-pub struct Score {
-    pub id: String,
-    pub track_id: String,
-    pub track: String,
-    pub album: String,
-    pub artists: Vec<String>,
-    pub user_id: String,
-    pub score: i32,
-    pub wins: i32,
-    pub losses: i32,
-}
-
-#[derive(Deserialize)]
-struct Playlists {
-    items: Vec<Playlist>,
-}
-
-#[derive(Deserialize)]
-pub struct Playlist {
-    pub id: String,
-    pub playlist_id: String,
-    pub name: String,
-    pub user_id: String,
-    pub tracks: Vec<String>,
-}
 
 struct State {
     current_page: Page,
