@@ -1,7 +1,7 @@
 #![feature(async_closure)]
 use rand::prelude::SliceRandom;
 use regex::Regex;
-use songsort::{Playlists, Scores, Score};
+use songsort::{Playlists, Score, Scores};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -60,11 +60,7 @@ pub async fn run() -> Result<(), JsValue> {
     let params = UrlSearchParams::new_with_str(&q)?;
     if let Some(code) = params.get("code") {
         state.borrow_mut().auth = code.clone();
-        let request = query(
-            "https://branlandapp.com/api/login",
-            "POST",
-            &state.borrow().auth,
-        )?;
+        let request = query("/api/login", "POST", &state.borrow().auth)?;
         let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
         let resp: Response = resp_value.dyn_into()?;
         if resp.status() == 401 {
@@ -265,7 +261,7 @@ async fn generate_home_page(state: &Rc<RefCell<State>>) -> Result<Element, JsVal
             if let Some(id) = re.captures_iter(&input).next() {
                 input = id[1].to_owned()
             }
-            let url = format!("https://branlandapp.com/api/playlists/{}", input);
+            let url = format!("/api/playlists/{}", input);
             let request = query(&url, "POST", &state.borrow().auth).unwrap();
             let resp_value = JsFuture::from(window.fetch_with_request(&request))
                 .await
@@ -286,12 +282,7 @@ async fn refresh_home_page(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
     let window = web_sys::window().expect("no global `window` exists");
     let document = window.document().expect("should have a document on window");
     load_playlists(Rc::clone(&state)).await?;
-    let request = query(
-        "https://branlandapp.com/api/scores",
-        "GET",
-        &state.borrow().auth,
-    )
-    .unwrap();
+    let request = query("/api/scores", "GET", &state.borrow().auth).unwrap();
     let resp_value = JsFuture::from(window.fetch_with_request(&request))
         .await
         .unwrap();
@@ -369,11 +360,7 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
     let playlists_element = document
         .get_element_by_id("playlists")
         .ok_or_else(|| JsValue::from("playlists element missing"))?;
-    let request = query(
-        "https://branlandapp.com/api/playlists",
-        "GET",
-        &state.borrow().auth,
-    )?;
+    let request = query("/api/playlists", "GET", &state.borrow().auth)?;
     let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
     let resp: Response = resp_value.dyn_into()?;
     let json = JsFuture::from(resp.json()?).await?;
@@ -450,7 +437,7 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
                 let id = p.id.clone();
                 wasm_bindgen_futures::spawn_local(async move {
                     let window = web_sys::window().expect("no global `window` exists");
-                    let url = format!("https://branlandapp.com/api/playlists/{}", id);
+                    let url = format!("/api/playlists/{}", id);
                     let request = query(&url, "DELETE", &state.borrow().auth).unwrap();
                     JsFuture::from(window.fetch_with_request(&request))
                         .await
@@ -467,12 +454,7 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
     let playlists_element = document
         .get_element_by_id("spotify")
         .ok_or_else(|| JsValue::from("spotify element missing"))?;
-    let request = query(
-        "https://branlandapp.com/api/spotify/playlists",
-        "GET",
-        &state.borrow().auth,
-    )
-    .unwrap();
+    let request = query("/api/spotify/playlists", "GET", &state.borrow().auth).unwrap();
     let resp_value = JsFuture::from(window.fetch_with_request(&request))
         .await
         .unwrap();
@@ -506,7 +488,7 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
             let id = p.playlist_id.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 let window = web_sys::window().expect("no global `window` exists");
-                let url = format!("https://branlandapp.com/api/playlists/{}", id);
+                let url = format!("/api/playlists/{}", id);
                 let request = query(&url, "POST", &state.borrow().auth).unwrap();
                 let resp_value = JsFuture::from(window.fetch_with_request(&request))
                     .await
@@ -708,10 +690,7 @@ fn refresh_scores(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), J
     let track1 = queued_scores.pop().unwrap();
     let track2 = queued_scores.pop().unwrap();
     let state_ref = Rc::clone(&state);
-    let url = format!(
-        "https://branlandapp.com/api/elo?{}&{}",
-        track1.track_id, track2.track_id
-    );
+    let url = format!("/api/elo?{}&{}", track1.track_id, track2.track_id);
     let a = Closure::wrap(Box::new(move || {
         let state = Rc::clone(&state_ref);
         let url = url.clone();
@@ -724,10 +703,7 @@ fn refresh_scores(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), J
         .set_onclick(Some(a.as_ref().unchecked_ref()));
     a.forget();
     let state_ref = Rc::clone(&state);
-    let url = format!(
-        "https://branlandapp.com/api/elo?{}&{}",
-        track2.track_id, track1.track_id
-    );
+    let url = format!("/api/elo?{}&{}", track2.track_id, track1.track_id);
     let a = Closure::wrap(Box::new(move || {
         let state = Rc::clone(&state_ref);
         let url = url.clone();
@@ -771,7 +747,7 @@ async fn fetch_scores(
     state: &Rc<RefCell<State>>,
     id: &str,
 ) -> Result<Scores, JsValue> {
-    let url = format!("https://branlandapp.com/api/playlists/{}/scores", id);
+    let url = format!("/api/playlists/{}/scores", id);
     let request = query(&url, "GET", &state.borrow().auth)?;
     let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
     let resp: Response = resp_value.dyn_into()?;
