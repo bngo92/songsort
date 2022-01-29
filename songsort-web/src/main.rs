@@ -15,6 +15,10 @@ use songsort::{Playlist, Playlists, Score, Scores};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
+#[cfg(feature = "dev")]
+use tokio::fs::File;
+#[cfg(feature = "dev")]
+use tokio::io::AsyncReadExt;
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -148,6 +152,27 @@ async fn route(
                 .map_err(Error::from),
         }
     } else {
+        #[cfg(feature = "dev")]
+        if let Some((file, mime)) = match req.uri().path() {
+            "/" => Some((File::open("../songsort-wasm/www/index.html"), "text/html")),
+            "/songsort_wasm.js" => Some((
+                File::open("../songsort-wasm/pkg/songsort_wasm.js"),
+                "application/javascript",
+            )),
+            "/songsort_wasm_bg.wasm" => Some((
+                File::open("../songsort-wasm/pkg/songsort_wasm_bg.wasm"),
+                "application/wasm",
+            )),
+            _ => None,
+        } {
+            let mut contents = Vec::new();
+            file.await?.read_to_end(&mut contents).await?;
+            return get_response_builder()
+                .header("Content-Type", HeaderValue::from_static(mime))
+                .status(StatusCode::OK)
+                .body(Body::from(contents))
+                .map_err(Error::from);
+        }
         get_response_builder()
             .header(
                 "Access-Control-Allow-Headers",
@@ -724,6 +749,8 @@ enum Error {
     RequestError(hyper::http::Error),
     JSONError(serde_json::Error),
     CosmosError(azure_data_cosmos::Error),
+    #[cfg(feature = "dev")]
+    IOError(std::io::Error),
 }
 
 impl From<hyper::Error> for Error {
@@ -747,5 +774,12 @@ impl From<serde_json::Error> for Error {
 impl From<azure_data_cosmos::Error> for Error {
     fn from(e: azure_data_cosmos::Error) -> Error {
         Error::CosmosError(e)
+    }
+}
+
+#[cfg(feature = "dev")]
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Error {
+        Error::IOError(e)
     }
 }
