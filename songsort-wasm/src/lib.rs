@@ -630,44 +630,39 @@ fn refresh_scores(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), J
     while let Some(child) = scores2.first_element_child() {
         child.remove();
     }
-    for (i, scores) in scores.scores.chunks_mut(2).enumerate() {
+    let mut iter = (1..).zip(scores.scores.iter());
+    while let Some((i, score)) = iter.next() {
         let row = document.create_element("tr")?;
         let num = document.create_element("th")?;
-        num.set_text_content(Some(&(2 * i + 1).to_string()));
+        num.set_text_content(Some(&i.to_string()));
         row.append_child(&num)?;
         let track = document.create_element("td")?;
-        track.set_text_content(Some(&scores[0].track));
+        track.set_text_content(Some(&score.track));
         row.append_child(&track)?;
         let record = document.create_element("td")?;
-        record.set_text_content(Some(&format!("{}-{}", scores[0].wins, scores[0].losses)));
+        record.set_text_content(Some(&format!("{}-{}", score.wins, score.losses)));
         row.append_child(&record)?;
         let score_element = document.create_element("td")?;
-        score_element.set_text_content(Some(&scores[0].score.to_string()));
+        score_element.set_text_content(Some(&score.score.to_string()));
         row.append_child(&score_element)?;
         scores1.append_child(&row)?;
 
-        let second_score = scores.get(1);
-        let row = document.create_element("tr")?;
-        let num = document.create_element("th")?;
-        if second_score.is_some() {
-            num.set_text_content(Some(&(2 * i + 2).to_string()));
-        }
-        row.append_child(&num)?;
-        let track = document.create_element("td")?;
-        track.set_text_content(second_score.map(|s| s.track.as_ref()));
-        row.append_child(&track)?;
-        let record = document.create_element("td")?;
-        if second_score.is_some() {
-            record.set_text_content(Some(&format!("{}-{}", scores[1].wins, scores[1].losses)));
-        }
-        row.append_child(&record)?;
-        let score_element = document.create_element("td")?;
-        if let Some(score) = second_score {
+        if let Some((i, score)) = iter.next() {
+            let row = document.create_element("tr")?;
+            let num = document.create_element("th")?;
+            num.set_text_content(Some(&i.to_string()));
+            row.append_child(&num)?;
+            let track = document.create_element("td")?;
+            track.set_text_content(Some(&score.track));
+            row.append_child(&track)?;
+            let record = document.create_element("td")?;
+            record.set_text_content(Some(&format!("{}-{}", score.wins, score.losses)));
+            row.append_child(&record)?;
+            let score_element = document.create_element("td")?;
             score_element.set_text_content(Some(&score.score.to_string()));
+            row.append_child(&score_element)?;
+            scores2.append_child(&row)?;
         }
-        row.append_child(&record)?;
-        row.append_child(&score_element)?;
-        scores2.append_child(&row)?;
     }
     let queued_scores = &mut state.borrow_mut().queued_scores;
     match queued_scores.len() {
