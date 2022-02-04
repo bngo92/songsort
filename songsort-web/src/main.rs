@@ -134,6 +134,7 @@ async fn route(
                 .body(Body::empty())
                 .map_err(Error::from),
             (["playlists"], &Method::GET) => get_playlists(db, session, user_id).await,
+            // TODO: deprecate
             (["playlists", playlist_id], &Method::POST) => {
                 import_playlist(db, session, user_id, playlist_id).await
             }
@@ -141,11 +142,13 @@ async fn route(
             (["playlists", id, "scores"], &Method::GET) => {
                 get_playlist_scores(db, session, user_id, id).await
             }
+            // TODO: deprecate
             (["elo"], &Method::POST) => elo(db, session, user_id, req.uri().query()).await,
             (["scores"], &Method::GET) => get_scores(db, session, user_id).await,
             (["spotify", "playlists"], &Method::GET) => {
                 get_spotify_playlists(user_id, access_token.as_ref().unwrap()).await
             }
+            ([""], &Method::POST) => handle_action(db, session, user_id, req.uri().query()).await,
             (_, _) => get_response_builder()
                 .status(StatusCode::METHOD_NOT_ALLOWED)
                 .body(Body::empty())
@@ -531,33 +534,40 @@ async fn get_scores(
         .map_err(Error::from)
 }
 
+async fn handle_action(
+    db: DatabaseClient,
+    session: Arc<RwLock<Option<ConsistencyLevel>>>,
+    user_id: String,
+    query: Option<&str>,
+) -> Result<Response<Body>, Error> {
+    if let Some(query) = query.and_then(|q| {
+        q.split('&')
+            .map(|s| s.split_once('='))
+            .collect::<Option<Vec<(&str, &str)>>>()
+    }) {
+        match query[..] {
+            [("action", "import"), ("playlist", id)] => {
+                return import_playlist(db, session, user_id, id).await;
+            }
+            [("action", "import"), ("album", id)] => {
+                return import_album(db, session, user_id, id).await;
+            }
+            _ => {}
+        }
+    }
+    get_response_builder()
+        .status(StatusCode::BAD_REQUEST)
+        .body(Body::empty())
+        .map_err(Error::from)
+}
+
 async fn import_playlist(
     db: DatabaseClient,
     session: Arc<RwLock<Option<ConsistencyLevel>>>,
     user_id: String,
     playlist_id: &str,
 ) -> Result<Response<Body>, Error> {
-    let https = HttpsConnector::new();
-    let client = Client::builder().build::<_, hyper::Body>(https);
-    let uri: Uri = "https://accounts.spotify.com/api/token".parse().unwrap();
-    let resp = client
-        .request(
-            Request::builder()
-                .method(Method::POST)
-                .uri(uri)
-                .header(
-                    "Authorization",
-                    &format!(
-                        "Basic {}",
-                        std::env::var("SPOTIFY_TOKEN").expect("SPOTIFY_TOKEN is missing")
-                    ),
-                )
-                .header("Content-Type", "application/x-www-form-urlencoded")
-                .body(Body::from("grant_type=client_credentials"))?,
-        )
-        .await?;
-    let got = hyper::body::to_bytes(resp.into_body()).await?;
-    let token: Token = serde_json::from_slice(&got)?;
+    let token = get_token().await?;
 
     let https = HttpsConnector::new();
     let client = Client::builder().build::<_, hyper::Body>(https);
@@ -604,7 +614,94 @@ async fn import_playlist(
             .map(|i| i.track.id.clone())
             .collect(),
     };
+    let scores: Vec<_> = playlist_items
+        .items
+        .iter()
+        .map(|i| Score {
+            id: Uuid::new_v4().to_hyphenated().to_string(),
+            track_id: i.track.id.clone(),
+            track: i.track.name.clone(),
+            album: i.track.album.name.clone(),
+            artists: i.track.artists.iter().map(|a| a.name.clone()).collect(),
+            user_id: user_id.clone(),
+            score: 1500,
+            wins: 0,
+            losses: 0,
+        })
+        .collect();
+    create_playlist(db, session, playlist, scores).await
+}
 
+async fn import_album(
+    db: DatabaseClient,
+    session: Arc<RwLock<Option<ConsistencyLevel>>>,
+    user_id: String,
+    id: &str,
+) -> Result<Response<Body>, Error> {
+    let token = get_token().await?;
+
+    let https = HttpsConnector::new();
+    let client = Client::builder().build::<_, hyper::Body>(https);
+    let uri: Uri = format!("https://api.spotify.com/v1/albums/{}", id)
+        .parse()
+        .unwrap();
+    let resp = client
+        .request(
+            Request::builder()
+                .uri(uri)
+                .header("Authorization", format!("Bearer {}", token.access_token))
+                .body(Body::empty())?,
+        )
+        .await?;
+    let got = hyper::body::to_bytes(resp.into_body()).await?;
+    let album: songsort_web::Album = serde_json::from_slice(&got)?;
+
+    let https = HttpsConnector::new();
+    let client = Client::builder().build::<_, hyper::Body>(https);
+    let uri: Uri = format!("https://api.spotify.com/v1/albums/{}/tracks", id)
+        .parse()
+        .unwrap();
+    let resp = client
+        .request(
+            Request::builder()
+                .uri(uri)
+                .header("Authorization", format!("Bearer {}", token.access_token))
+                .body(Body::empty())?,
+        )
+        .await?;
+    let got = hyper::body::to_bytes(resp.into_body()).await?;
+    let album_items: songsort_web::AlbumItems = serde_json::from_slice(&got)?;
+    let playlist = Playlist {
+        id: Uuid::new_v4().to_hyphenated().to_string(),
+        user_id: user_id.clone(),
+        playlist_id: id.to_owned(),
+        name: album.name.clone(),
+        tracks: album_items.items.iter().map(|i| i.id.clone()).collect(),
+    };
+    let scores: Vec<_> = album_items
+        .items
+        .iter()
+        .map(|i| Score {
+            id: Uuid::new_v4().to_hyphenated().to_string(),
+            track_id: i.id.clone(),
+            track: i.name.clone(),
+            album: album.name.clone(),
+            artists: i.artists.iter().map(|a| a.name.clone()).collect(),
+            user_id: user_id.clone(),
+            score: 1500,
+            wins: 0,
+            losses: 0,
+        })
+        .collect();
+    create_playlist(db, session, playlist, scores).await
+}
+
+async fn create_playlist(
+    db: DatabaseClient,
+    session: Arc<RwLock<Option<ConsistencyLevel>>>,
+    playlist: Playlist,
+    scores: Vec<Score>,
+) -> Result<Response<Body>, Error> {
     let playlist_client = db.clone().into_collection_client("playlists");
     let session_copy = session.read().unwrap().clone();
     let session = if let Some(session) = session_copy {
@@ -625,18 +722,7 @@ async fn import_playlist(
         session_copy
     };
     let score_client = db.into_collection_client("scores");
-    for i in &playlist_items.items {
-        let score = Score {
-            id: Uuid::new_v4().to_hyphenated().to_string(),
-            track_id: i.track.id.clone(),
-            track: i.track.name.clone(),
-            album: i.track.album.name.clone(),
-            artists: i.track.artists.iter().map(|a| a.name.clone()).collect(),
-            user_id: user_id.clone(),
-            score: 1500,
-            wins: 0,
-            losses: 0,
-        };
+    for score in scores {
         score_client
             .create_document(
                 Context::new(),
@@ -699,6 +785,30 @@ async fn get_spotify_playlists(
     get_response_builder()
         .body(Body::from(serde_json::to_string(&playlists)?))
         .map_err(Error::from)
+}
+
+async fn get_token() -> Result<Token, Error> {
+    let https = HttpsConnector::new();
+    let client = Client::builder().build::<_, hyper::Body>(https);
+    let uri: Uri = "https://accounts.spotify.com/api/token".parse().unwrap();
+    let resp = client
+        .request(
+            Request::builder()
+                .method(Method::POST)
+                .uri(uri)
+                .header(
+                    "Authorization",
+                    &format!(
+                        "Basic {}",
+                        std::env::var("SPOTIFY_TOKEN").expect("SPOTIFY_TOKEN is missing")
+                    ),
+                )
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .body(Body::from("grant_type=client_credentials"))?,
+        )
+        .await?;
+    let got = hyper::body::to_bytes(resp.into_body()).await?;
+    serde_json::from_slice(&got).map_err(Error::from)
 }
 
 #[tokio::main]

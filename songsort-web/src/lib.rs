@@ -22,10 +22,23 @@ pub struct Item {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct AlbumItems {
+    pub items: Vec<AlbumTrack>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Track {
     pub id: String,
     pub name: String,
     pub album: Album,
+    pub artists: Vec<Artist>,
+    pub preview_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AlbumTrack {
+    pub id: String,
+    pub name: String,
     pub artists: Vec<Artist>,
     pub preview_url: Option<String>,
 }
