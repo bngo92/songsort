@@ -257,11 +257,18 @@ async fn generate_home_page(state: &Rc<RefCell<State>>) -> Result<Element, JsVal
                 .dyn_into::<HtmlInputElement>()
                 .unwrap();
             let mut input = input.value();
-            let re = Regex::new(r"https://open.spotify.com/playlist/([[:alnum:]]*)").unwrap();
-            if let Some(id) = re.captures_iter(&input).next() {
-                input = id[1].to_owned()
-            }
-            let url = format!("/api/playlists/{}", input);
+            let playlist_re =
+                Regex::new(r"https://open.spotify.com/playlist/([[:alnum:]]*)").unwrap();
+            let album_re = Regex::new(r"https://open.spotify.com/album/([[:alnum:]]*)").unwrap();
+            let url = if let Some(id) = playlist_re.captures_iter(&input).next() {
+                input = id[1].to_owned();
+                format!("/api/?action=import&playlist={}", input)
+            } else if let Some(id) = album_re.captures_iter(&input).next() {
+                input = id[1].to_owned();
+                format!("/api/?action=import&album={}", input)
+            } else {
+                input
+            };
             let request = query(&url, "POST", &state.borrow().auth).unwrap();
             let resp_value = JsFuture::from(window.fetch_with_request(&request))
                 .await
@@ -473,7 +480,10 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
             .create_element("a")?
             .dyn_into::<HtmlAnchorElement>()?;
         link.set_text_content(Some(&p.name));
-        link.set_href(&format!("https://open.spotify.com/playlist/{}", p.name));
+        link.set_href(&format!(
+            "https://open.spotify.com/playlist/{}",
+            p.playlist_id
+        ));
         label.append_child(&link)?;
         row.append_child(&label)?;
         let button = document
