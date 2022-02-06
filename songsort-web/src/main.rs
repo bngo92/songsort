@@ -853,14 +853,17 @@ async fn main() {
     );
     let session = Arc::new(RwLock::new(None));
 
-    import_playlist(
-        client.clone().into_database_client("songsort"),
-        Arc::clone(&session),
-        String::from(DEMO_USER),
-        "37i9dQZF1DX49jUV2NfGku",
-    )
-    .await
-    .unwrap();
+    // Reset demo user data during startup in production
+    if cfg!(not(feature = "dev")) {
+        import_playlist(
+            client.clone().into_database_client("songsort"),
+            Arc::clone(&session),
+            String::from(DEMO_USER),
+            "37i9dQZF1DX49jUV2NfGku",
+        )
+        .await
+        .unwrap();
+    }
 
     let make_svc = make_service_fn(move |_conn| {
         let client_ref = client.clone();
