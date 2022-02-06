@@ -488,7 +488,7 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
                         405 => {
                             demo_alert(&window).unwrap();
                         }
-                        201 => {
+                        204 => {
                             load_playlists(state).await.unwrap();
                         }
                         // TODO: error handling
