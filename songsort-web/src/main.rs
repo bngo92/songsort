@@ -5,7 +5,7 @@ use azure_data_cosmos::prelude::{
     CosmosOptions, CreateDocumentOptions, DatabaseClient, DeleteDocumentOptions,
     GetDocumentOptions, GetDocumentResponse, Query, ReplaceDocumentOptions,
 };
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use hyper::header::HeaderValue;
 use hyper::http::response::Builder;
 use hyper::service::{make_service_fn, service_fn};
@@ -615,8 +615,8 @@ async fn import_playlist(
         )
         .await?;
     let got = hyper::body::to_bytes(resp.into_body()).await?;
-    let playlist_items: songsort_web::PlaylistItems = serde_json::from_slice(&got)?;
-    let playlist = Playlist {
+    let mut playlist_items: songsort_web::PlaylistItems = serde_json::from_slice(&got)?;
+    let mut playlist = Playlist {
         id: playlist_id.to_owned(),
         user_id: user_id.clone(),
         playlist_id: playlist_id.to_owned(),
@@ -627,7 +627,7 @@ async fn import_playlist(
             .map(|i| i.track.id.clone())
             .collect(),
     };
-    let scores: Vec<_> = playlist_items
+    let mut scores: Vec<_> = playlist_items
         .items
         .iter()
         .map(|i| Score {
@@ -642,6 +642,33 @@ async fn import_playlist(
             losses: 0,
         })
         .collect();
+    while let Some(uri) = playlist_items.next {
+        let uri: Uri = uri.parse().unwrap();
+        let resp = client
+            .request(
+                Request::builder()
+                    .uri(uri)
+                    .header("Authorization", format!("Bearer {}", token.access_token))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        let got = hyper::body::to_bytes(resp.into_body()).await?;
+        playlist_items = serde_json::from_slice(&got)?;
+        for i in &playlist_items.items {
+            playlist.tracks.push(i.track.id.clone());
+            scores.push(Score {
+                id: i.track.id.clone(),
+                track_id: i.track.id.clone(),
+                track: i.track.name.clone(),
+                album: i.track.album.name.clone(),
+                artists: i.track.artists.iter().map(|a| a.name.clone()).collect(),
+                user_id: user_id.clone(),
+                score: 1500,
+                wins: 0,
+                losses: 0,
+            });
+        }
+    }
     // Reset demo user data
     create_playlist(db, session, playlist, scores, user_id == DEMO_USER).await
 }
@@ -770,11 +797,9 @@ async fn create_playlist(
                 Err(e)
             })
     }))
-    .buffered(10)
-    .into_future()
-    .await
-    .0
-    .transpose()?;
+    .buffered(5)
+    .try_collect::<()>()
+    .await?;
     get_response_builder()
         .status(StatusCode::CREATED)
         .body(Body::empty())

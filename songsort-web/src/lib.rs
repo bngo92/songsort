@@ -14,6 +14,7 @@ pub struct Playlist {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct PlaylistItems {
     pub items: Vec<Item>,
+    pub next: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
