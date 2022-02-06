@@ -5,6 +5,7 @@ use azure_data_cosmos::prelude::{
     CosmosOptions, CreateDocumentOptions, DatabaseClient, DeleteDocumentOptions,
     GetDocumentOptions, GetDocumentResponse, Query, ReplaceDocumentOptions,
 };
+use futures::StreamExt;
 use hyper::header::HeaderValue;
 use hyper::http::response::Builder;
 use hyper::service::{make_service_fn, service_fn};
@@ -745,11 +746,11 @@ async fn create_playlist(
     let score_client = db.into_collection_client("scores");
     let score_client = &score_client;
     let session = &session;
-    futures::future::try_join_all(scores.iter().map(async move |score| {
+    futures::stream::iter(scores.into_iter().map(async move |score| {
         score_client
             .create_document(
                 Context::new(),
-                score,
+                &score,
                 CreateDocumentOptions::new()
                     .is_upsert(is_upsert)
                     .consistency_level(session.clone()),
@@ -769,7 +770,11 @@ async fn create_playlist(
                 Err(e)
             })
     }))
-    .await?;
+    .buffered(10)
+    .into_future()
+    .await
+    .0
+    .transpose()?;
     get_response_builder()
         .status(StatusCode::CREATED)
         .body(Body::empty())
