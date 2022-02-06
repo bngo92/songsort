@@ -1,4 +1,4 @@
-#![feature(let_else)]
+#![feature(async_closure, let_else)]
 use azure_core::Context;
 use azure_data_cosmos::prelude::{
     AuthorizationToken, CollectionClient, ConsistencyLevel, CosmosClient, CosmosEntity,
@@ -743,11 +743,13 @@ async fn create_playlist(
         session_copy
     };
     let score_client = db.into_collection_client("scores");
-    for score in scores {
+    let score_client = &score_client;
+    let session = &session;
+    futures::future::try_join_all(scores.iter().map(async move |score| {
         score_client
             .create_document(
                 Context::new(),
-                &score,
+                score,
                 CreateDocumentOptions::new()
                     .is_upsert(is_upsert)
                     .consistency_level(session.clone()),
@@ -765,8 +767,9 @@ async fn create_playlist(
                     }
                 }
                 Err(e)
-            })?;
-    }
+            })
+    }))
+    .await?;
     get_response_builder()
         .status(StatusCode::CREATED)
         .body(Body::empty())
