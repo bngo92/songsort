@@ -44,6 +44,8 @@ impl<'a> CosmosEntity<'a> for User {
     }
 }
 
+const DEMO_USER: &str = "demo";
+
 async fn handle(
     db: CosmosClient,
     req: Request<Body>,
@@ -85,24 +87,31 @@ async fn route(
                 .map_err(Error::from);
         }
         let Some(auth) = req.headers().get("Authorization") else {
-            return get_response_builder()
-                .status(StatusCode::UNAUTHORIZED)
-                .body(Body::empty())
-                .map_err(Error::from)};
+            return unauthorized()};
         let Some((_, auth)) = auth.to_str().expect("auth to be ASCII").split_once(' ') else {
             return get_response_builder()
                 .status(StatusCode::BAD_REQUEST)
                 .body(Body::empty())
                 .map_err(Error::from);
         };
-        let (user_id, access_token) = if auth == std::env::var("AUTH").expect("AUTH is missing") {
-            (
-                req.headers()["x-real-ip"]
-                    .to_str()
-                    .expect("x-real-ip to be ASCII")
-                    .to_owned(),
-                None,
-            )
+        if auth == "demo" {
+            let user_id = String::from(DEMO_USER);
+            match (&path[..], req.method()) {
+                (["playlists"], &Method::GET) => get_playlists(db, session, user_id).await,
+                (["playlists", id, "scores"], &Method::GET) => {
+                    get_playlist_scores(db, session, user_id, id).await
+                }
+                // TODO: deprecate
+                (["elo"], &Method::POST) => elo(db, session, user_id, req.uri().query()).await,
+                (["scores"], &Method::GET) => get_scores(db, session, user_id).await,
+                /*([""], &Method::POST) => {
+                    handle_action(db, session, user_id, req.uri().query()).await
+                }*/
+                (_, _) => get_response_builder()
+                    .status(StatusCode::METHOD_NOT_ALLOWED)
+                    .body(Body::empty())
+                    .map_err(Error::from),
+            }
         } else if let Ok((user_id, access_token)) = login(db.clone(), &session, auth, {
             let uri: Uri = req.headers()["Referer"]
                 .to_str()
@@ -117,42 +126,42 @@ async fn route(
         })
         .await
         {
-            (user_id, Some(access_token))
+            match (&path[..], req.method()) {
+                (["login"], &Method::POST) => get_response_builder()
+                    .header(
+                        "Access-Control-Allow-Headers",
+                        HeaderValue::from_static("Authorization"),
+                    )
+                    .status(StatusCode::OK)
+                    .body(Body::empty())
+                    .map_err(Error::from),
+                (["playlists"], &Method::GET) => get_playlists(db, session, user_id).await,
+                // TODO: deprecate
+                (["playlists", playlist_id], &Method::POST) => {
+                    import_playlist(db, session, user_id, playlist_id).await
+                }
+                (["playlists", id], &Method::DELETE) => {
+                    delete_playlist(db, session, user_id, id).await
+                }
+                (["playlists", id, "scores"], &Method::GET) => {
+                    get_playlist_scores(db, session, user_id, id).await
+                }
+                // TODO: deprecate
+                (["elo"], &Method::POST) => elo(db, session, user_id, req.uri().query()).await,
+                (["scores"], &Method::GET) => get_scores(db, session, user_id).await,
+                (["spotify", "playlists"], &Method::GET) => {
+                    get_spotify_playlists(user_id, &access_token).await
+                }
+                ([""], &Method::POST) => {
+                    handle_action(db, session, user_id, req.uri().query()).await
+                }
+                (_, _) => get_response_builder()
+                    .status(StatusCode::METHOD_NOT_ALLOWED)
+                    .body(Body::empty())
+                    .map_err(Error::from),
+            }
         } else {
-            return get_response_builder()
-                .status(StatusCode::UNAUTHORIZED)
-                .body(Body::empty())
-                .map_err(Error::from);
-        };
-        match (&path[..], req.method()) {
-            (["login"], &Method::POST) => get_response_builder()
-                .header(
-                    "Access-Control-Allow-Headers",
-                    HeaderValue::from_static("Authorization"),
-                )
-                .status(StatusCode::OK)
-                .body(Body::empty())
-                .map_err(Error::from),
-            (["playlists"], &Method::GET) => get_playlists(db, session, user_id).await,
-            // TODO: deprecate
-            (["playlists", playlist_id], &Method::POST) => {
-                import_playlist(db, session, user_id, playlist_id).await
-            }
-            (["playlists", id], &Method::DELETE) => delete_playlist(db, session, user_id, id).await,
-            (["playlists", id, "scores"], &Method::GET) => {
-                get_playlist_scores(db, session, user_id, id).await
-            }
-            // TODO: deprecate
-            (["elo"], &Method::POST) => elo(db, session, user_id, req.uri().query()).await,
-            (["scores"], &Method::GET) => get_scores(db, session, user_id).await,
-            (["spotify", "playlists"], &Method::GET) => {
-                get_spotify_playlists(user_id, access_token.as_ref().unwrap()).await
-            }
-            ([""], &Method::POST) => handle_action(db, session, user_id, req.uri().query()).await,
-            (_, _) => get_response_builder()
-                .status(StatusCode::METHOD_NOT_ALLOWED)
-                .body(Body::empty())
-                .map_err(Error::from),
+            unauthorized()
         }
     } else {
         #[cfg(feature = "dev")]
@@ -197,7 +206,9 @@ async fn login(
     let query = format!("SELECT * FROM c WHERE c.auth = \"{}\"", auth);
     let query = Query::new(&query);
     let session_copy = session.read().unwrap().clone();
-    let (resp, session) = if let Some(session) = session_copy {
+    // TODO: debug why session token isn't working here
+    let (resp, session) = /*if let Some(session) = session_copy {
+        println!("{:?}", session);
         (
             db.query_documents()
                 .query_cross_partition(true)
@@ -207,7 +218,7 @@ async fn login(
                 .await?,
             session,
         )
-    } else {
+    } else */{
         let resp = db
             .query_documents()
             .query_cross_partition(true)
@@ -294,6 +305,7 @@ async fn get_playlists(
     let query = Query::new(&query);
     let session_copy = session.read().unwrap().clone();
     let resp = if let Some(session) = session_copy {
+        println!("{:?}", session);
         db.query_documents()
             .consistency_level(session)
             .execute(&query)
@@ -604,7 +616,7 @@ async fn import_playlist(
     let got = hyper::body::to_bytes(resp.into_body()).await?;
     let playlist_items: songsort_web::PlaylistItems = serde_json::from_slice(&got)?;
     let playlist = Playlist {
-        id: Uuid::new_v4().to_hyphenated().to_string(),
+        id: playlist_id.to_owned(),
         user_id: user_id.clone(),
         playlist_id: playlist_id.to_owned(),
         name: playlist.name,
@@ -618,7 +630,7 @@ async fn import_playlist(
         .items
         .iter()
         .map(|i| Score {
-            id: Uuid::new_v4().to_hyphenated().to_string(),
+            id: i.track.id.clone(),
             track_id: i.track.id.clone(),
             track: i.track.name.clone(),
             album: i.track.album.name.clone(),
@@ -629,7 +641,8 @@ async fn import_playlist(
             losses: 0,
         })
         .collect();
-    create_playlist(db, session, playlist, scores).await
+    // Reset demo user data
+    create_playlist(db, session, playlist, scores, user_id == DEMO_USER).await
 }
 
 async fn import_album(
@@ -693,7 +706,7 @@ async fn import_album(
             losses: 0,
         })
         .collect();
-    create_playlist(db, session, playlist, scores).await
+    create_playlist(db, session, playlist, scores, false).await
 }
 
 async fn create_playlist(
@@ -701,6 +714,7 @@ async fn create_playlist(
     session: Arc<RwLock<Option<ConsistencyLevel>>>,
     playlist: Playlist,
     scores: Vec<Score>,
+    is_upsert: bool,
 ) -> Result<Response<Body>, Error> {
     let playlist_client = db.clone().into_collection_client("playlists");
     let session_copy = session.read().unwrap().clone();
@@ -709,14 +723,21 @@ async fn create_playlist(
             .create_document(
                 Context::new(),
                 &playlist,
-                CreateDocumentOptions::new().consistency_level(session.clone()),
+                CreateDocumentOptions::new()
+                    .is_upsert(true)
+                    .consistency_level(session.clone()),
             )
             .await?;
         session
     } else {
         let resp = playlist_client
-            .create_document(Context::new(), &playlist, CreateDocumentOptions::new())
-            .await?;
+            .create_document(
+                Context::new(),
+                &playlist,
+                CreateDocumentOptions::new().is_upsert(true),
+            )
+            .await
+            .unwrap();
         let session_copy = ConsistencyLevel::Session(resp.session_token);
         *session.write().unwrap() = Some(session_copy.clone());
         session_copy
@@ -727,7 +748,9 @@ async fn create_playlist(
             .create_document(
                 Context::new(),
                 &score,
-                CreateDocumentOptions::new().consistency_level(session.clone()),
+                CreateDocumentOptions::new()
+                    .is_upsert(is_upsert)
+                    .consistency_level(session.clone()),
             )
             .await
             .map(|_| ())
@@ -829,6 +852,16 @@ async fn main() {
         CosmosOptions::default(),
     );
     let session = Arc::new(RwLock::new(None));
+
+    import_playlist(
+        client.clone().into_database_client("songsort"),
+        Arc::clone(&session),
+        String::from(DEMO_USER),
+        "37i9dQZF1DX49jUV2NfGku",
+    )
+    .await
+    .unwrap();
+
     let make_svc = make_service_fn(move |_conn| {
         let client_ref = client.clone();
         let session = Arc::clone(&session);
@@ -846,6 +879,13 @@ async fn main() {
     if let Err(e) = server.await {
         eprintln!("server error: {}", e);
     }
+}
+
+fn unauthorized() -> Result<Response<Body>, Error> {
+    get_response_builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .body(Body::empty())
+        .map_err(Error::from)
 }
 
 fn get_response_builder() -> Builder {
