@@ -141,7 +141,7 @@ async fn switch_pages(state: Rc<RefCell<State>>, next_page: Page) -> Result<(), 
                 element
             } else {
                 web_sys::console::log_1(&JsValue::from("Generating home page"));
-                generate_home_page(&state).await?
+                generate_home_page(&state, borrowed_state.auth == "demo").await?
             };
             main.append_child(&element)?;
             borrowed_state.current_page = Page::Home;
@@ -188,7 +188,7 @@ async fn switch_pages(state: Rc<RefCell<State>>, next_page: Page) -> Result<(), 
     Ok(())
 }
 
-async fn generate_home_page(state: &Rc<RefCell<State>>) -> Result<Element, JsValue> {
+async fn generate_home_page(state: &Rc<RefCell<State>>, demo: bool) -> Result<Element, JsValue> {
     let window = web_sys::window().expect("no global `window` exists");
     let document = window.document().expect("should have a document on window");
     let home = document.create_element("div")?;
@@ -218,6 +218,9 @@ async fn generate_home_page(state: &Rc<RefCell<State>>) -> Result<Element, JsVal
     import.set_type("button");
     import.set_class_name("col-1 offset-2 btn btn-success");
     import.set_text_content(Some("Save"));
+    if demo {
+        import.set_disabled(true);
+    }
     form_row.append_child(&import)?;
     form.append_child(&form_row)?;
     row.append_child(&form)?;
@@ -303,9 +306,6 @@ async fn generate_home_page(state: &Rc<RefCell<State>>) -> Result<Element, JsVal
                 .unwrap();
             let resp: Response = resp_value.dyn_into().unwrap();
             match resp.status() {
-                405 => {
-                    demo_alert(&window).unwrap();
-                }
                 201 => {
                     load_playlists(state).await.unwrap();
                 }
@@ -472,6 +472,9 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
             button.set_type("button");
             button.set_class_name("btn btn-danger col-1");
             button.set_text_content(Some("Unsave"));
+            if state.borrow().auth == "demo" {
+                button.set_disabled(true);
+            }
             let state_ref = Rc::clone(&state);
             let a = Closure::wrap(Box::new(move || {
                 let state = Rc::clone(&state_ref);
@@ -485,9 +488,6 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
                         .unwrap();
                     let resp: Response = resp_value.dyn_into().unwrap();
                     match resp.status() {
-                        405 => {
-                            demo_alert(&window).unwrap();
-                        }
                         204 => {
                             load_playlists(state).await.unwrap();
                         }
@@ -511,7 +511,12 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
         .unwrap();
     let resp: Response = resp_value.dyn_into().unwrap();
     if resp.status() == 405 {
-        web_sys::console::log_1(&JsValue::from("Not supported in demo"));
+        while let Some(child) = playlists_element.first_element_child() {
+            child.remove();
+        }
+        let p = document.create_element("p")?;
+        p.set_text_content(Some("Not supported in demo"));
+        playlists_element.append_child(&p)?;
         return Ok(());
     }
     let json = JsFuture::from(resp.json()?).await?;
@@ -553,9 +558,6 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
                     .unwrap();
                 let resp: Response = resp_value.dyn_into().unwrap();
                 match resp.status() {
-                    405 => {
-                        demo_alert(&window).unwrap();
-                    }
                     201 => {
                         load_playlists(state).await.unwrap();
                     }
@@ -823,10 +825,6 @@ fn query(url: &str, method: &str, auth: &str) -> Result<Request, JsValue> {
         .headers()
         .set("Authorization", &format!("Basic {}", auth))?;
     Ok(request)
-}
-
-fn demo_alert(window: &Window) -> Result<(), JsValue> {
-    window.alert_with_message("Not supported in demo")
 }
 
 fn create_th(document: &Document, class: &str, text: &str) -> Result<Element, JsValue> {
