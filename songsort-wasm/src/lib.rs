@@ -26,7 +26,13 @@ struct State {
 enum Page {
     Login,
     Home,
-    RandomMatch(String),
+    Random(Random, String),
+}
+
+#[derive(PartialEq)]
+enum Random {
+    Match,
+    Round,
 }
 
 // Called by our JS entry point to run the example
@@ -119,7 +125,7 @@ async fn switch_pages(state: Rc<RefCell<State>>, next_page: Page) -> Result<(), 
                 borrowed_state.home = Some(child);
             }
         }
-        Page::RandomMatch(_) => {
+        Page::Random(_, _) => {
             if let Some(child) = main.first_element_child() {
                 child.remove();
                 borrowed_state.random_match = Some(child);
@@ -148,7 +154,7 @@ async fn switch_pages(state: Rc<RefCell<State>>, next_page: Page) -> Result<(), 
             drop(borrowed_state);
             refresh_home_page(state).await?;
         }
-        Page::RandomMatch(id) => {
+        Page::Random(_, id) => {
             let mut borrowed_state = state.borrow_mut();
             let element = if let Some(element) = borrowed_state.random_match.take() {
                 element
@@ -167,7 +173,7 @@ async fn switch_pages(state: Rc<RefCell<State>>, next_page: Page) -> Result<(), 
                 .dyn_into::<HtmlAnchorElement>()?;
             item.set_class_name("nav-link");
             item.set_href("#");
-            item.set_text_content(Some("Random match"));
+            item.set_text_content(Some("Random Matches"));
             li.append_child(&item)?;
             ul.append_child(&li)?;
             navbar
@@ -175,7 +181,7 @@ async fn switch_pages(state: Rc<RefCell<State>>, next_page: Page) -> Result<(), 
                 .item(0)
                 .expect("brand element missing")
                 .insert_adjacent_element("afterend", &ul)?;
-            borrowed_state.current_page = Page::RandomMatch(id.clone());
+            borrowed_state.current_page = Page::Random(Random::Match, id.clone());
             borrowed_state.playlist = Some(id.clone());
             drop(borrowed_state);
             let scores = fetch_scores(&window, &state, &id).await?;
@@ -459,7 +465,9 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
                             .alert_with_message("Playlist has less than 2 songs")
                             .expect("alert");
                     } else {
-                        switch_pages(state, Page::RandomMatch(id)).await.unwrap();
+                        switch_pages(state, Page::Random(Random::Match, id))
+                            .await
+                            .unwrap();
                     }
                 });
             }) as Box<dyn FnMut()>);
@@ -580,7 +588,7 @@ fn generate_random_page() -> Result<Element, JsValue> {
     let random = document.create_element("div")?;
     random.set_id("random");
     let header = document.create_element("h1")?;
-    header.set_text_content(Some("Random match"));
+    header.set_text_content(Some("Random Matches"));
     random.append_child(&header)?;
     let row = document.create_element("div")?;
     row.set_class_name("row");
