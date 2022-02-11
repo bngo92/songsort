@@ -199,9 +199,34 @@ async fn generate_home_page(state: &Rc<RefCell<State>>, demo: bool) -> Result<El
     let document = window.document().expect("should have a document on window");
     let home = document.create_element("div")?;
     home.set_id("home");
+    let row = document.create_element("div")?;
+    row.set_class_name("row");
+    let col = document.create_element("div")?;
+    col.set_class_name("col-7");
     let header = document.create_element("h1")?;
     header.set_text_content(Some("Saved Playlists"));
-    home.append_child(&header)?;
+    col.append_child(&header)?;
+    row.append_child(&col)?;
+    let label = document.create_element("label")?;
+    label.set_class_name("col-2 col-form-label text-end align-self-end");
+    let text = document.create_element("strong")?;
+    text.set_text_content(Some("Sort Mode:"));
+    label.append_child(&text)?;
+    row.append_child(&label)?;
+    let mode = document.create_element("div")?;
+    mode.set_class_name("col-2 align-self-end");
+    let select = document.create_element("select")?;
+    select.set_id("mode");
+    select.set_class_name("form-select");
+    let option = document.create_element("option")?;
+    option.set_text_content(Some("Random Matches"));
+    select.append_child(&option)?;
+    let option = document.create_element("option")?;
+    option.set_text_content(Some("Random Rounds"));
+    select.append_child(&option)?;
+    mode.append_child(&select)?;
+    row.append_child(&mode)?;
+    home.append_child(&row)?;
     let playlists = document.create_element("div")?;
     playlists.set_id("playlists");
     home.append_child(&playlists)?;
@@ -210,24 +235,30 @@ async fn generate_home_page(state: &Rc<RefCell<State>>, demo: bool) -> Result<El
     let form = document.create_element("form")?;
     let form_row = document.create_element("div")?;
     form_row.set_class_name("row");
+    let col = document.create_element("div")?;
+    col.set_class_name("col-9 pt-1");
     let input = document
         .create_element("input")?
         .dyn_into::<HtmlInputElement>()?;
     input.set_type("text");
     input.set_id("input");
     input.set_value("https://open.spotify.com/playlist/37i9dQZF1DX49jUV2NfGku?si=379bbc586c78450a");
-    input.set_class_name("col-7");
-    form_row.append_child(&input)?;
+    input.set_class_name("col-12");
+    col.append_child(&input)?;
+    form_row.append_child(&col)?;
+    let col = document.create_element("div")?;
+    col.set_class_name("col-1 pe-2");
     let import = document
         .create_element("button")?
         .dyn_into::<HtmlButtonElement>()?;
     import.set_type("button");
-    import.set_class_name("col-1 offset-2 btn btn-success");
+    import.set_class_name("col-12 btn btn-success");
     import.set_text_content(Some("Save"));
     if demo {
         import.set_disabled(true);
     }
-    form_row.append_child(&import)?;
+    col.append_child(&import)?;
+    form_row.append_child(&col)?;
     form.append_child(&form_row)?;
     row.append_child(&form)?;
     home.append_child(&row)?;
@@ -426,7 +457,7 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
             let row = document.create_element("div")?;
             row.set_class_name("row");
             let label = document.create_element("label")?;
-            label.set_class_name("col-7");
+            label.set_class_name("col-9 col-form-label");
             let link = document
                 .create_element("a")?
                 .dyn_into::<HtmlAnchorElement>()?;
@@ -437,20 +468,13 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
             ));
             label.append_child(&link)?;
             row.append_child(&label)?;
-            let div = document.create_element("div")?;
-            div.set_class_name("col-2");
-            let select = document.create_element("select")?;
-            select.set_class_name("form-select");
-            let option = document.create_element("option")?;
-            option.set_text_content(Some("Random match"));
-            select.append_child(&option)?;
-            div.append_child(&select)?;
-            row.append_child(&div)?;
+            let col = document.create_element("div")?;
+            col.set_class_name("col-1 pe-2");
             let button = document
                 .create_element("button")?
                 .dyn_into::<HtmlButtonElement>()?;
             button.set_type("button");
-            button.set_class_name("btn btn-success col-1 me-2");
+            button.set_class_name("btn btn-success col-12");
             button.set_text_content(Some("Go"));
             let state_ref = Rc::clone(&state);
             let id = p.id.clone();
@@ -473,12 +497,15 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
             }) as Box<dyn FnMut()>);
             button.set_onclick(Some(a.as_ref().unchecked_ref()));
             a.forget();
-            row.append_child(&button)?;
+            col.append_child(&button)?;
+            row.append_child(&col)?;
+            let col = document.create_element("div")?;
+            col.set_class_name("col-1 bs-2");
             let button = document
                 .create_element("button")?
                 .dyn_into::<HtmlButtonElement>()?;
             button.set_type("button");
-            button.set_class_name("btn btn-danger col-1");
+            button.set_class_name("btn btn-danger col-12");
             button.set_text_content(Some("Unsave"));
             if state.borrow().auth == "demo" {
                 button.set_disabled(true);
@@ -506,7 +533,8 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
             }) as Box<dyn FnMut()>);
             button.set_onclick(Some(a.as_ref().unchecked_ref()));
             a.forget();
-            row.append_child(&button)?;
+            col.append_child(&button)?;
+            row.append_child(&col)?;
             playlists_element.append_child(&row)?;
         }
     }
@@ -536,7 +564,7 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
         let row = document.create_element("div")?;
         row.set_class_name("row");
         let label = document.create_element("label")?;
-        label.set_class_name("col-9");
+        label.set_class_name("col-9 col-form-label");
         let link = document
             .create_element("a")?
             .dyn_into::<HtmlAnchorElement>()?;
@@ -547,11 +575,13 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
         ));
         label.append_child(&link)?;
         row.append_child(&label)?;
+        let col = document.create_element("div")?;
+        col.set_class_name("col-1 pe-2");
         let button = document
             .create_element("button")?
             .dyn_into::<HtmlButtonElement>()?;
         button.set_type("button");
-        button.set_class_name("btn btn-success col-1");
+        button.set_class_name("btn btn-success col-12");
         button.set_text_content(Some("Save"));
         let state_ref = Rc::clone(&state);
         let a = Closure::wrap(Box::new(move || {
@@ -576,7 +606,8 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
         }) as Box<dyn FnMut()>);
         button.set_onclick(Some(a.as_ref().unchecked_ref()));
         a.forget();
-        row.append_child(&button)?;
+        col.append_child(&button)?;
+        row.append_child(&col)?;
         playlists_element.append_child(&row)?;
     }
     Ok(())
