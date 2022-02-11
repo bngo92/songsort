@@ -10,7 +10,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     Document, Element, HtmlAnchorElement, HtmlButtonElement, HtmlIFrameElement, HtmlInputElement,
-    Request, RequestInit, RequestMode, Response, UrlSearchParams, Window,
+    HtmlSelectElement, Request, RequestInit, RequestMode, Response, UrlSearchParams, Window,
 };
 
 struct State {
@@ -154,7 +154,7 @@ async fn switch_pages(state: Rc<RefCell<State>>, next_page: Page) -> Result<(), 
             drop(borrowed_state);
             refresh_home_page(state).await?;
         }
-        Page::Random(_, id) => {
+        Page::Random(r, id) => {
             let mut borrowed_state = state.borrow_mut();
             let element = if let Some(element) = borrowed_state.random_match.take() {
                 element
@@ -173,7 +173,14 @@ async fn switch_pages(state: Rc<RefCell<State>>, next_page: Page) -> Result<(), 
                 .dyn_into::<HtmlAnchorElement>()?;
             item.set_class_name("nav-link");
             item.set_href("#");
-            item.set_text_content(Some("Random Matches"));
+            match r {
+                Random::Match => {
+                    item.set_text_content(Some("Random Matches"));
+                }
+                Random::Round => {
+                    item.set_text_content(Some("Random Rounds"));
+                }
+            }
             li.append_child(&item)?;
             ul.append_child(&li)?;
             navbar
@@ -181,7 +188,7 @@ async fn switch_pages(state: Rc<RefCell<State>>, next_page: Page) -> Result<(), 
                 .item(0)
                 .expect("brand element missing")
                 .insert_adjacent_element("afterend", &ul)?;
-            borrowed_state.current_page = Page::Random(Random::Match, id.clone());
+            borrowed_state.current_page = Page::Random(r, id.clone());
             borrowed_state.playlist = Some(id.clone());
             drop(borrowed_state);
             let scores = fetch_scores(&window, &state, &id).await?;
@@ -483,15 +490,35 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
                 let id = id.clone();
                 wasm_bindgen_futures::spawn_local(async move {
                     let window = web_sys::window().expect("no global `window` exists");
+                    let document = window.document().expect("should have a document on window");
                     let scores = fetch_scores(&window, &state, &id).await.unwrap();
                     if scores.scores.len() < 2 {
                         window
                             .alert_with_message("Playlist has less than 2 songs")
                             .expect("alert");
                     } else {
-                        switch_pages(state, Page::Random(Random::Match, id))
-                            .await
-                            .unwrap();
+                        let mode = document
+                            .get_element_by_id("mode")
+                            .unwrap()
+                            .dyn_into::<HtmlSelectElement>()
+                            .unwrap()
+                            .value();
+                        switch_pages(
+                            state,
+                            Page::Random(
+                                match mode.as_ref() {
+                                    "Random Matches" => Random::Match,
+                                    "Random Rounds" => Random::Round,
+                                    _ => {
+                                        web_sys::console::log_1(&JsValue::from("Invalid mode"));
+                                        return;
+                                    }
+                                },
+                                id,
+                            ),
+                        )
+                        .await
+                        .unwrap();
                     }
                 });
             }) as Box<dyn FnMut()>);
@@ -769,23 +796,30 @@ fn refresh_scores(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), J
             scores2.append_child(&row)?;
         }
     }
-    let queued_scores = &mut state.borrow_mut().queued_scores;
-    match queued_scores.len() {
-        // Reload the queue if it's empty
-        0 => {
-            let mut scores = scores.scores;
-            scores.shuffle(&mut rand::thread_rng());
-            queued_scores.extend(scores);
+    let mut borrowed_state = state.borrow_mut();
+    let queued_scores = if matches!(borrowed_state.current_page, Page::Random(Random::Round, _)) {
+        let queued_scores = &mut borrowed_state.queued_scores;
+        match queued_scores.len() {
+            // Reload the queue if it's empty
+            0 => {
+                let mut scores = scores.scores;
+                scores.shuffle(&mut rand::thread_rng());
+                queued_scores.extend(scores);
+            }
+            // Always queue the last song next before reloading
+            1 => {
+                let last = queued_scores.pop().unwrap();
+                let mut scores = scores.scores;
+                scores.shuffle(&mut rand::thread_rng());
+                queued_scores.extend(scores);
+                queued_scores.push(last);
+            }
+            _ => {}
         }
-        // Always queue the last song next before reloading
-        1 => {
-            let last = queued_scores.pop().unwrap();
-            let mut scores = scores.scores;
-            scores.shuffle(&mut rand::thread_rng());
-            queued_scores.extend(scores);
-            queued_scores.push(last);
-        }
-        _ => {}
+        queued_scores
+    } else {
+        scores.scores.shuffle(&mut rand::thread_rng());
+        &mut scores.scores
     };
     let track1 = queued_scores.pop().unwrap();
     let track2 = queued_scores.pop().unwrap();
