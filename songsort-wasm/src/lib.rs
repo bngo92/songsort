@@ -1,9 +1,9 @@
-#![feature(async_closure)]
+#![feature(async_closure, int_log, iter_intersperse)]
 use rand::prelude::SliceRandom;
 use regex::Regex;
 use songsort::{Playlists, Score, Scores};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -13,13 +13,17 @@ use web_sys::{
     HtmlSelectElement, Request, RequestInit, RequestMode, Response, UrlSearchParams, Window,
 };
 
+pub mod tournament;
+
 struct State {
     current_page: Page,
     playlist: Option<String>, // TODO: do we still need this?
     auth: String,
     home: Option<Element>,
     random_match: Option<Element>,
-    queued_scores: Vec<Score>,
+    queued_scores: VecDeque<Score>,
+    eliminated_scores: Vec<Score>,
+    tournament: Vec<Score>,
 }
 
 #[derive(PartialEq)]
@@ -33,6 +37,7 @@ enum Page {
 enum Random {
     Match,
     Round,
+    Elimination,
 }
 
 // Called by our JS entry point to run the example
@@ -46,7 +51,9 @@ pub async fn run() -> Result<(), JsValue> {
         auth: String::new(),
         home: None,
         random_match: None,
-        queued_scores: Vec::new(),
+        queued_scores: VecDeque::new(),
+        eliminated_scores: Vec::new(),
+        tournament: Vec::new(),
     }));
     let state_ref = Rc::clone(&state);
     let a = Closure::wrap(Box::new(move || {
@@ -132,6 +139,7 @@ async fn switch_pages(state: Rc<RefCell<State>>, next_page: Page) -> Result<(), 
             }
             navbar.children().item(1).unwrap().remove();
             borrowed_state.queued_scores.clear();
+            borrowed_state.eliminated_scores.clear();
         }
         Page::Login => {
             if let Some(child) = main.first_element_child() {
@@ -179,6 +187,9 @@ async fn switch_pages(state: Rc<RefCell<State>>, next_page: Page) -> Result<(), 
                 }
                 Random::Round => {
                     item.set_text_content(Some("Random Rounds"));
+                }
+                Random::Elimination => {
+                    item.set_text_content(Some("Elimination"));
                 }
             }
             li.append_child(&item)?;
@@ -230,6 +241,9 @@ async fn generate_home_page(state: &Rc<RefCell<State>>, demo: bool) -> Result<El
     select.append_child(&option)?;
     let option = document.create_element("option")?;
     option.set_text_content(Some("Random Rounds"));
+    select.append_child(&option)?;
+    let option = document.create_element("option")?;
+    option.set_text_content(Some("Elimination"));
     select.append_child(&option)?;
     mode.append_child(&select)?;
     row.append_child(&mode)?;
@@ -509,6 +523,7 @@ async fn load_playlists(state: Rc<RefCell<State>>) -> Result<(), JsValue> {
                                 match mode.as_ref() {
                                     "Random Matches" => Random::Match,
                                     "Random Rounds" => Random::Round,
+                                    "Elimination" => Random::Elimination,
                                     _ => {
                                         web_sys::console::log_1(&JsValue::from("Invalid mode"));
                                         return;
@@ -737,7 +752,15 @@ fn generate_random_page() -> Result<Element, JsValue> {
 }
 
 fn refresh_scores(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), JsValue> {
-    async fn elo(state: Rc<RefCell<State>>, url: String) -> Result<(), JsValue> {
+    async fn elo(state: Rc<RefCell<State>>, win: Score, lose: Score) -> Result<(), JsValue> {
+        if matches!(
+            state.borrow().current_page,
+            Page::Random(Random::Elimination, _)
+        ) {
+            state.borrow_mut().queued_scores.push_back(win.clone());
+            state.borrow_mut().eliminated_scores.push(lose.clone());
+        }
+        let url = format!("/api/elo?{}&{}", win.track_id, lose.track_id);
         let window = web_sys::window().expect("no global `window` exists");
         let request = query(&url, "POST", &state.borrow().auth)?;
         JsFuture::from(window.fetch_with_request(&request)).await?;
@@ -749,7 +772,49 @@ fn refresh_scores(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), J
 
     let window = web_sys::window().expect("no global `window` exists");
     let document = window.document().expect("should have a document on window");
-    scores.scores.sort_by_key(|s| -s.score);
+    fn to_string(i: usize) -> String {
+        i.to_string()
+    }
+    let ordered_scores: Vec<_> = if matches!(
+        state.borrow().current_page,
+        Page::Random(Random::Elimination, _)
+    ) {
+        if state.borrow().tournament.is_empty() {
+            let n = scores.scores.len();
+            for n in 2..32 {
+                tournament::generate_tournament(n);
+            }
+            state.borrow_mut().tournament.reserve_exact(n);
+            state
+                .borrow_mut()
+                .queued_scores
+                .extend(scores.scores.iter().cloned());
+        }
+        // Pattern for slicing a queue
+        state.borrow_mut().queued_scores.make_contiguous();
+        let ordered_scores: Vec<_> = match state.borrow_mut().queued_scores.as_slices().0 {
+            [s] => vec![(String::from("1"), s.clone())],
+            s => std::iter::repeat(String::new())
+                .zip(s.iter().cloned())
+                .collect(),
+        };
+        let len = ordered_scores.len() + 1;
+        ordered_scores
+            .into_iter()
+            .chain(
+                (len..)
+                    .map(to_string)
+                    .zip(state.borrow().eliminated_scores.iter().rev().cloned()),
+            )
+            .collect()
+    } else {
+        let mut ordered_scores = scores.scores.clone();
+        ordered_scores.sort_by_key(|s| -s.score);
+        (1..)
+            .map(to_string)
+            .zip(ordered_scores.into_iter())
+            .collect()
+    };
     let scores1 = document
         .get_element_by_id("scores1")
         .ok_or_else(|| JsValue::from("scores element missing"))?;
@@ -762,11 +827,11 @@ fn refresh_scores(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), J
     while let Some(child) = scores2.first_element_child() {
         child.remove();
     }
-    let mut iter = (1..).zip(scores.scores.iter());
+    let mut iter = ordered_scores.iter();
     while let Some((i, score)) = iter.next() {
         let row = document.create_element("tr")?;
         let num = document.create_element("th")?;
-        num.set_text_content(Some(&i.to_string()));
+        num.set_text_content(Some(i));
         row.append_child(&num)?;
         let track = document.create_element("td")?;
         track.set_text_content(Some(&score.track));
@@ -782,7 +847,7 @@ fn refresh_scores(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), J
         if let Some((i, score)) = iter.next() {
             let row = document.create_element("tr")?;
             let num = document.create_element("th")?;
-            num.set_text_content(Some(&i.to_string()));
+            num.set_text_content(Some(i));
             row.append_child(&num)?;
             let track = document.create_element("td")?;
             track.set_text_content(Some(&score.track));
@@ -796,6 +861,7 @@ fn refresh_scores(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), J
             scores2.append_child(&row)?;
         }
     }
+    let mut queued_scores = VecDeque::new();
     let mut borrowed_state = state.borrow_mut();
     let queued_scores = if matches!(borrowed_state.current_page, Page::Random(Random::Round, _)) {
         let queued_scores = &mut borrowed_state.queued_scores;
@@ -808,27 +874,39 @@ fn refresh_scores(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), J
             }
             // Always queue the last song next before reloading
             1 => {
-                let last = queued_scores.pop().unwrap();
+                let last = queued_scores.pop_back().unwrap();
                 let mut scores = scores.scores;
                 scores.shuffle(&mut rand::thread_rng());
                 queued_scores.extend(scores);
-                queued_scores.push(last);
+                queued_scores.push_back(last);
             }
             _ => {}
         }
         queued_scores
+    } else if matches!(
+        borrowed_state.current_page,
+        Page::Random(Random::Elimination, _)
+    ) {
+        if borrowed_state.queued_scores.len() == 1 {
+            window.alert_with_message("Elimination completed")?;
+            return Ok(());
+        }
+        &mut borrowed_state.queued_scores
     } else {
         scores.scores.shuffle(&mut rand::thread_rng());
-        &mut scores.scores
+        queued_scores.extend(scores.scores);
+        &mut queued_scores
     };
-    let track1 = queued_scores.pop().unwrap();
-    let track2 = queued_scores.pop().unwrap();
+    let track1 = queued_scores.pop_front().unwrap();
+    let track2 = queued_scores.pop_front().unwrap();
+    let track1_copy = track1.clone();
+    let track2_copy = track2.clone();
     let state_ref = Rc::clone(&state);
-    let url = format!("/api/elo?{}&{}", track1.track_id, track2.track_id);
     let a = Closure::wrap(Box::new(move || {
         let state = Rc::clone(&state_ref);
-        let url = url.clone();
-        wasm_bindgen_futures::spawn_local(async { elo(state, url).await.unwrap() })
+        let track1 = track1_copy.clone();
+        let track2 = track2_copy.clone();
+        wasm_bindgen_futures::spawn_local(async { elo(state, track1, track2).await.unwrap() })
     }) as Box<dyn FnMut()>);
     document
         .get_element_by_id("score1")
@@ -836,12 +914,14 @@ fn refresh_scores(state: Rc<RefCell<State>>, mut scores: Scores) -> Result<(), J
         .dyn_into::<HtmlButtonElement>()?
         .set_onclick(Some(a.as_ref().unchecked_ref()));
     a.forget();
+    let track1_copy = track1.clone();
+    let track2_copy = track2.clone();
     let state_ref = Rc::clone(&state);
-    let url = format!("/api/elo?{}&{}", track2.track_id, track1.track_id);
     let a = Closure::wrap(Box::new(move || {
         let state = Rc::clone(&state_ref);
-        let url = url.clone();
-        wasm_bindgen_futures::spawn_local(async { elo(state, url).await.unwrap() })
+        let track1 = track1_copy.clone();
+        let track2 = track2_copy.clone();
+        wasm_bindgen_futures::spawn_local(async { elo(state, track2, track1).await.unwrap() })
     }) as Box<dyn FnMut()>);
     document
         .get_element_by_id("score2")
