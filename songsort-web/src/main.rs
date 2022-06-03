@@ -22,6 +22,27 @@ use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use uuid::Uuid;
 
+fn get_user(d: Document) -> Result<User, Error> {
+    match d.document {
+        DocumentEnum::User(u) => Ok(u),
+        _ => Err(Error::Error("not a user")),
+    }
+}
+
+fn get_score(d: Document) -> Result<Score, Error> {
+    match d.document {
+        DocumentEnum::Score(s) => Ok(s),
+        _ => Err(Error::Error("not a score")),
+    }
+}
+
+fn get_playlist(d: Document) -> Result<Playlist, Error> {
+    match d.document {
+        DocumentEnum::Playlist(p) => Ok(p),
+        _ => Err(Error::Error("not a playlist")),
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct Token {
     access_token: String,
@@ -29,20 +50,34 @@ struct Token {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+struct Document {
+    id: String,
+    user_id: String,
+    document: DocumentEnum,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+enum DocumentEnum {
+    User(User),
+    Score(Score),
+    Playlist(Playlist),
+}
+
+impl<'a> CosmosEntity<'a> for Document {
+    type Entity = &'a str;
+
+    fn partition_key(&'a self) -> Self::Entity {
+        self.user_id.as_ref()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct User {
     id: String,
     user_id: String,
     auth: String,
     access_token: String,
     refresh_token: String,
-}
-
-impl<'a> CosmosEntity<'a> for User {
-    type Entity = &'a str;
-
-    fn partition_key(&'a self) -> Self::Entity {
-        self.user_id.as_ref()
-    }
 }
 
 const DEMO_USER: &str = "demo";
@@ -204,7 +239,7 @@ async fn login(
     origin: &str,
 ) -> Result<(String, String), Error> {
     let db = db.into_collection_client("users");
-    let query = format!("SELECT * FROM c WHERE c.auth = \"{}\"", auth);
+    let query = format!("SELECT * FROM c WHERE c.document.User.auth = \"{}\"", auth);
     let query = Query::new(&query);
     let session_copy = session.read().unwrap().clone();
     // TODO: debug why session token isn't working here
@@ -234,9 +269,10 @@ async fn login(
         .into_documents()?
         .results
         .into_iter()
-        .map(|r| -> User { r.result })
+        .map(|r| get_user(r.result))
         .next()
     {
+        let user = user?;
         return Ok((user.user_id, user.access_token));
     }
     let https = HttpsConnector::new();
@@ -289,7 +325,11 @@ async fn login(
     };
     db.create_document(
         Context::new(),
-        &user,
+        &Document {
+            id: user.id.clone(),
+            user_id: user.user_id.clone(),
+            document: DocumentEnum::User(user.clone()),
+        },
         CreateDocumentOptions::new().consistency_level(session),
     )
     .await?;
@@ -301,8 +341,11 @@ async fn get_playlists(
     session: Arc<RwLock<Option<ConsistencyLevel>>>,
     user_id: String,
 ) -> Result<Response<Body>, Error> {
-    let db = db.into_collection_client("playlists");
-    let query = format!("SELECT * FROM c WHERE c.user_id = \"{}\"", user_id);
+    let db = db.into_collection_client("users");
+    let query = format!(
+        "SELECT * FROM c WHERE c.user_id = \"{}\" AND IS_DEFINED(c.document.Playlist)",
+        user_id
+    );
     let query = Query::new(&query);
     let session_copy = session.read().unwrap().clone();
     let resp = if let Some(session) = session_copy {
@@ -321,8 +364,8 @@ async fn get_playlists(
             .into_documents()?
             .results
             .into_iter()
-            .map(|r| r.result)
-            .collect(),
+            .map(|r| get_playlist(r.result))
+            .collect::<Result<Vec<_>, _>>()?,
     };
     get_response_builder()
         .body(Body::from(serde_json::to_string(&playlists)?))
@@ -337,7 +380,7 @@ async fn delete_playlist(
 ) -> Result<Response<Body>, Error> {
     let session_copy = session.read().unwrap().clone();
     if let Some(session) = session_copy {
-        db.into_collection_client("playlists")
+        db.into_collection_client("users")
             .into_document_client(id, &user_id)?
             .delete_document(
                 Context::new(),
@@ -346,7 +389,7 @@ async fn delete_playlist(
             .await?;
     } else {
         let resp = db
-            .into_collection_client("playlists")
+            .into_collection_client("users")
             .into_document_client(id, &user_id)?
             .delete_document(Context::new(), DeleteDocumentOptions::new())
             .await?;
@@ -365,7 +408,7 @@ async fn elo(
     query: Option<&str>,
 ) -> Result<Response<Body>, Error> {
     if let Some((win, lose)) = query.and_then(|s| s.split_once('&')) {
-        let client = db.clone().into_collection_client("scores");
+        let client = db.clone().into_collection_client("users");
         let scores =
             get_score_docs(client.clone(), &session, user_id.clone(), &[win, lose]).await?;
         let mut iter = scores.into_iter();
@@ -398,12 +441,20 @@ async fn elo(
             futures::future::try_join(
                 client1.replace_document(
                     Context::new(),
-                    &win_score,
+                    &Document {
+                        id: win_score.id.clone(),
+                        user_id: win_score.user_id.clone(),
+                        document: DocumentEnum::Score(win_score),
+                    },
                     ReplaceDocumentOptions::new().consistency_level(session.clone()),
                 ),
                 client2.replace_document(
                     Context::new(),
-                    &lose_score,
+                    &Document {
+                        id: lose_score.id.clone(),
+                        user_id: lose_score.user_id.clone(),
+                        document: DocumentEnum::Score(lose_score),
+                    },
                     ReplaceDocumentOptions::new().consistency_level(session),
                 ),
             )
@@ -433,7 +484,7 @@ async fn get_score_docs(
     track_ids: &[&str],
 ) -> Result<Vec<Score>, Error> {
     let query = format!(
-        "SELECT * FROM c WHERE c.user_id = \"{}\" AND c.track_id IN ({})",
+        "SELECT * FROM c WHERE c.user_id = \"{}\" AND c.document.Score.track_id IN ({})",
         user_id,
         track_ids
             .iter()
@@ -457,8 +508,8 @@ async fn get_score_docs(
         .into_documents()?
         .results
         .into_iter()
-        .map(|r| r.result)
-        .collect())
+        .map(|r| get_score(r.result))
+        .collect::<Result<Vec<_>, _>>()?)
 }
 
 async fn get_playlist_scores(
@@ -469,20 +520,20 @@ async fn get_playlist_scores(
 ) -> Result<Response<Body>, Error> {
     let client = db
         .clone()
-        .into_collection_client("playlists")
+        .into_collection_client("users")
         .into_document_client(id, &user_id)?;
     let playlist = if let GetDocumentResponse::Found(playlist) = client
-        .get_document::<Playlist>(Context::new(), GetDocumentOptions::new())
+        .get_document::<Document>(Context::new(), GetDocumentOptions::new())
         .await?
     {
-        playlist.document.document
+        get_playlist(playlist.document.document)?
     } else {
         todo!()
     };
 
-    let db = db.into_collection_client("scores");
+    let db = db.into_collection_client("users");
     let query = format!(
-        "SELECT * FROM c WHERE c.user_id = \"{}\" AND c.track_id IN ({})",
+        "SELECT * FROM c WHERE c.user_id = \"{}\" AND c.document.Score.track_id IN ({})",
         user_id,
         playlist
             .tracks
@@ -508,8 +559,8 @@ async fn get_playlist_scores(
             .into_documents()?
             .results
             .into_iter()
-            .map(|r| r.result)
-            .collect(),
+            .map(|r| get_score(r.result))
+            .collect::<Result<Vec<_>, _>>()?,
     };
     get_response_builder()
         .body(Body::from(serde_json::to_string(&scores)?))
@@ -521,8 +572,11 @@ async fn get_scores(
     session: Arc<RwLock<Option<ConsistencyLevel>>>,
     user_id: String,
 ) -> Result<Response<Body>, Error> {
-    let db = db.into_collection_client("scores");
-    let query = format!("SELECT * FROM c WHERE c.user_id = \"{}\"", user_id);
+    let db = db.into_collection_client("users");
+    let query = format!(
+        "SELECT * FROM c WHERE c.user_id = \"{}\" AND IS_DEFINED(c.document.Score)",
+        user_id
+    );
     let session_copy = session.read().unwrap().clone();
     let resp = if let Some(session) = session_copy {
         db.query_documents()
@@ -539,8 +593,8 @@ async fn get_scores(
             .into_documents()?
             .results
             .into_iter()
-            .map(|r| r.result)
-            .collect(),
+            .map(|r| get_score(r.result))
+            .collect::<Result<Vec<_>, _>>()?,
     };
     get_response_builder()
         .body(Body::from(serde_json::to_string(&scores)?))
@@ -744,13 +798,17 @@ async fn create_playlist(
     scores: Vec<Score>,
     is_upsert: bool,
 ) -> Result<Response<Body>, Error> {
-    let playlist_client = db.clone().into_collection_client("playlists");
+    let playlist_client = db.clone().into_collection_client("users");
     let session_copy = session.read().unwrap().clone();
     let session = if let Some(session) = session_copy {
         playlist_client
             .create_document(
                 Context::new(),
-                &playlist,
+                &Document {
+                    id: playlist.id.clone(),
+                    user_id: playlist.user_id.clone(),
+                    document: DocumentEnum::Playlist(playlist),
+                },
                 CreateDocumentOptions::new()
                     .is_upsert(true)
                     .consistency_level(session.clone()),
@@ -761,7 +819,11 @@ async fn create_playlist(
         let resp = playlist_client
             .create_document(
                 Context::new(),
-                &playlist,
+                &Document {
+                    id: playlist.id.clone(),
+                    user_id: playlist.user_id.clone(),
+                    document: DocumentEnum::Playlist(playlist),
+                },
                 CreateDocumentOptions::new().is_upsert(true),
             )
             .await
@@ -770,14 +832,18 @@ async fn create_playlist(
         *session.write().unwrap() = Some(session_copy.clone());
         session_copy
     };
-    let score_client = db.into_collection_client("scores");
+    let score_client = db.into_collection_client("users");
     let score_client = &score_client;
     let session = &session;
     futures::stream::iter(scores.into_iter().map(async move |score| {
         score_client
             .create_document(
                 Context::new(),
-                &score,
+                &Document {
+                    id: score.id.clone(),
+                    user_id: score.user_id.clone(),
+                    document: DocumentEnum::Score(score),
+                },
                 CreateDocumentOptions::new()
                     .is_upsert(is_upsert)
                     .consistency_level(session.clone()),
@@ -931,6 +997,7 @@ fn get_response_builder() -> Builder {
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug)]
 enum Error {
+    Error(&'static str),
     HyperError(hyper::Error),
     RequestError(hyper::http::Error),
     JSONError(serde_json::Error),
